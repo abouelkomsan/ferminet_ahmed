@@ -45,7 +45,8 @@ def get_config():
   cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx"}}
   cfg.network.network_type = "psiformer"
   cfg.network.complex = False
-  cfg.batch_size = 1000
+  cfg.network.psiformer.numlayers = 3
+  cfg.batch_size = 1024
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {
