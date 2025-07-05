@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License
 
-"""Unpolarised 14 electron simple cubic homogeneous electron gas."""
 
 from ferminet import base_config
 from ferminet.pbc import envelopes
