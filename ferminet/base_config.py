@@ -265,7 +265,7 @@ def default() -> ml_collections.ConfigDict:
           # Only used if network_type is 'psiformer'.
           'psiformer': {
               # PsiFormer architecture: von Glehn, Spencer, Pfau, ICLR 2023.
-              'num_layers': 4,
+              'num_layers': 4,  #note to myself : num_heads * heads_dim = mlp_hidden_dims
               'num_heads': 4,
               'heads_dim': 64,
               'mlp_hidden_dims': (256,),

@@ -218,3 +218,5 @@ def local_energy(
     return potential + kinetic, None
 
   return _e_l
+
+#note to myself: modify Hamiltonian here
