@@ -280,6 +280,6 @@ def local_energy(
         data.positions, data.atoms, ndim=2)
     potential = potential_energy(ae, ee)
     kinetic = ke(params, data)
-    return potential + kinetic, None
+    return potential + jnp.real(kinetic), None
 
   return _e_l
