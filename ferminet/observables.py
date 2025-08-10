@@ -315,7 +315,7 @@ def make_density_matrix(
     scf_approx.mo_coeff = ckpt_state.mo_coeff
   else:
     t = 0
-    pos = pos.copy().reshape(-1, 3)
+    pos = pos.copy().reshape(-1, 2)
     data_shape = (jax.local_device_count(), device_batch_size * nstates)
     idx = np.random.randint(
         low=0,

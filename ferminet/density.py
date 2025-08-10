@@ -29,7 +29,7 @@ def _eval_mos(pos: jnp.ndarray, scf_approx: scf.Scf,
   """Evaluates molecular orbitals.
 
   Args:
-    pos: Electron positions of shape (M, 3), where M can be anything.
+    pos: Electron positions of shape (M, 2), where M can be anything.
     scf_approx: SCF object with information about the Hartree-Fock calculation.
     nspins: Number of spin-up and spin-down electrons.
 
@@ -57,7 +57,7 @@ def calc_hf_prob(pos: jnp.ndarray, scf_approx: scf.Scf,
 
   # evaluate occupied phi's
   _, occ_mos = _eval_mos(
-      pos=pos.reshape(-1, 3), scf_approx=scf_approx, nspins=nspins)
+      pos=pos.reshape(-1, 2), scf_approx=scf_approx, nspins=nspins)
 
   # The probability density of finding a single electron at position r, given a
   # HF wavefunction, is the mean of |phi_i|^2 for each occupied orbital phi_i.

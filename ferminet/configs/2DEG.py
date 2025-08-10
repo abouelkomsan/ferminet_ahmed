@@ -44,16 +44,18 @@ def get_config():
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_2DEG.local_energy"
   cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx"}}
   cfg.network.network_type = "psiformer"
-  cfg.network.complex = False
-  cfg.network.psiformer.numlayers = 3
+  cfg.network.complex = True
+  cfg.network.psiformer.num_layers = 3
   cfg.batch_size = 1024
+  cfg.optim.iterations = 1000
+  cfg.optim.lr.rate = 0.01
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {
       "lattice": lattice,
       "include_r_ae": False,
   }
-  cfg.network.jastrow = 'NONE'
+  cfg.network.jastrow = 'none'
   cfg.network.make_envelope_fn = ( "ferminet.envelopes.make_null_envelope" )
   #cfg.network.make_envelope_kwargs = {"kpoints": kpoints}
   cfg.network.full_det = True
