@@ -179,3 +179,39 @@ def restore(restore_filename: str, batch_size: Optional[int] = None):
           f'Wrong batch size in loaded data. Expected {batch_size}, found '
           f'{data.positions.shape[0] * data.positions.shape[1]}.')
   return t, data, params, opt_state, mcmc_width, density_state
+
+def restore_no_batch_check(restore_filename: str, batch_size: Optional[int] = None):
+  """Restores data saved in a checkpoint.
+
+  Args:
+    restore_filename: filename containing checkpoint.
+    batch_size: total batch size to be used. If present, check the data saved in
+      the checkpoint is consistent with the batch size requested for the
+      calculation.
+
+  Returns:
+    (t, data, params, opt_state, mcmc_width) tuple, where
+    t: number of completed iterations.
+    data: MCMC walker configurations.
+    params: pytree of network parameters.
+    opt_state: optimization state.
+    mcmc_width: width to use in the MCMC proposal distribution.
+    density_state: optional state of the density matrix calculation
+
+  """
+  logging.info('Loading checkpoint %s', restore_filename)
+  with open(restore_filename, 'rb') as f:
+    ckpt_data = np.load(f, allow_pickle=True)
+    # Retrieve data from npz file. Non-array variables need to be converted back
+    # to natives types using .tolist().
+    t = ckpt_data['t'].tolist() + 1  # Return the iterations completed.
+    data = networks.FermiNetData(**ckpt_data['data'].item())
+    params = ckpt_data['params'].tolist()
+    opt_state = ckpt_data['opt_state'].tolist()
+    mcmc_width = jnp.array(ckpt_data['mcmc_width'].tolist())
+    if ckpt_data['density_state']:
+      density_state = observables.DensityState(
+          **ckpt_data['density_state'].item())
+    else:
+      density_state = None
+  return t, data, params, opt_state, mcmc_width, density_state

@@ -119,7 +119,8 @@ def make_2DCoulomb_potential(
 
       # Add Madelung constant term: (1/2) * N * q_i^2 * Madelung_const
       # Since q_i^2 = 1, this simplifies to (1/2) * N * Madelung_const
-      potential = 0.5 * jnp.sum(ewald) + 0.5 * nelec * madelung_const - 0.5 * nelec**2 * phi_S_q0
+      #potential = 0.5 * jnp.sum(ewald) + 0.5 * nelec * madelung_const - 0.5 * nelec**2 * phi_S_q0
+      potential = 0.5*jnp.sum(ewald) - 0.5*nelec*(nelec-1)*phi_S_q0 #modified the second term
       return potential
 
   def potential(ae: jnp.ndarray, ee: jnp.ndarray):
@@ -280,6 +281,6 @@ def local_energy(
         data.positions, data.atoms, ndim=2)
     potential = potential_energy(ae, ee)
     kinetic = ke(params, data)
-    return potential + jnp.real(kinetic), None
+    return kinetic + potential, None
 
   return _e_l

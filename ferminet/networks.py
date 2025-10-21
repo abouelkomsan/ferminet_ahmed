@@ -1243,6 +1243,394 @@ def make_orbitals(
 
   return init, apply
 
+def make_orbitals_bosons_sum(
+    nspins: Tuple[int, int],
+    charges: jnp.ndarray,
+    options: BaseNetworkOptions,
+    equivariant_layers: Tuple[InitLayersFn, ApplyLayersFn],
+) -> ...:
+  """Returns init, apply pair for orbitals.
+
+  Args:
+    nspins: Tuple with number of spin up and spin down electrons.
+    charges: (atom) array of atomic nuclear charges.
+    options: Network configuration.
+    equivariant_layers: Tuple of init, apply functions for the equivariant
+      interaction part of the network.
+  """
+
+  equivariant_layers_init, equivariant_layers_apply = equivariant_layers
+
+  # Optional Jastrow factor.
+  jastrow_init, jastrow_apply = jastrows.get_jastrow(options.jastrow)
+
+  def init(key: chex.PRNGKey) -> ParamTree:
+    """Returns initial random parameters for creating orbitals.
+
+    Args:
+      key: RNG state.
+    """
+    key, subkey = jax.random.split(key)
+    params = {}
+    dims_orbital_in, params['layers'] = equivariant_layers_init(subkey)
+
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    nchannels = len(active_spin_channels)
+    if nchannels == 0:
+      raise ValueError('No electrons present!')
+
+    # How many spin-orbitals do we need to create per spin channel?
+    nspin_orbitals = []
+    num_states = max(options.states, 1)
+    for nspin in active_spin_channels:
+      if options.full_det:
+        # Dense determinant. Need N orbitals per electron per determinant.
+        norbitals = sum(nspins) * options.determinants * num_states
+      else:
+        # Spin-factored block-diagonal determinant. Need nspin orbitals per
+        # electron per determinant.
+        norbitals = nspin * options.determinants * num_states
+      if options.complex_output:
+        norbitals *= 2  # one output is real, one is imaginary
+      nspin_orbitals.append(norbitals)
+
+    # create envelope params
+    natom = charges.shape[0]
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      # Applied to output from final layer of 1e stream.
+      output_dims = dims_orbital_in
+    elif options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      # Applied to orbitals.
+      if options.complex_output:
+        output_dims = [nspin_orbital // 2 for nspin_orbital in nspin_orbitals]
+      else:
+        output_dims = nspin_orbitals
+    else:
+      raise ValueError('Unknown envelope type')
+    params['envelope'] = options.envelope.init(
+        natom=natom, output_dims=output_dims, ndim=options.ndim
+    )
+
+    # Jastrow params.
+    if jastrow_init is not None:
+      params['jastrow'] = jastrow_init()
+
+    # orbital shaping
+    orbitals = []
+    for nspin_orbital in nspin_orbitals:
+      key, subkey = jax.random.split(key)
+      orbitals.append(
+          network_blocks.init_linear_layer(
+              subkey,
+              in_dim=dims_orbital_in,
+              out_dim=nspin_orbital,
+              include_bias=options.bias_orbitals,
+          )
+      )
+    params['orbital'] = orbitals
+
+    return params
+
+  def apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Sequence[jnp.ndarray]:
+    """Forward evaluation of the Fermionic Neural Network up to the orbitals.
+
+    Args:
+      params: network parameter tree.
+      pos: The electron positions, a 3N dimensional vector.
+      spins: The electron spins, an N dimensional vector.
+      atoms: Array with positions of atoms.
+      charges: Array with atomic charges.
+
+    Returns:
+      One matrix (two matrices if options.full_det is False) that exchange
+      columns under the exchange of inputs of shape (ndet, nalpha+nbeta,
+      nalpha+nbeta) (or (ndet, nalpha, nalpha) and (ndet, nbeta, nbeta)).
+    """
+    ae, ee, r_ae, r_ee = construct_input_features(pos, atoms, ndim=options.ndim)
+    h_to_orbitals = equivariant_layers_apply(
+        params['layers'],
+        ae=ae,
+        r_ae=r_ae,
+        ee=ee,
+        r_ee=r_ee,
+        spins=spins,
+        charges=charges,
+    )
+
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      envelope_factor = options.envelope.apply(
+          ae=ae, r_ae=r_ae, r_ee=r_ee, **params['envelope']
+      )
+      h_to_orbitals = envelope_factor * h_to_orbitals
+    # Note split creates arrays of size 0 for spin channels without electrons.
+    h_to_orbitals = jnp.split(
+        h_to_orbitals, network_blocks.array_partitions(nspins), axis=0
+    )
+    # Drop unoccupied spin channels
+    h_to_orbitals = [h for h, spin in zip(h_to_orbitals, nspins) if spin > 0]
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    active_spin_partitions = network_blocks.array_partitions(
+        active_spin_channels
+    )
+    # Create orbitals.
+    orbitals = [
+        network_blocks.linear_layer(h, **p)
+        for h, p in zip(h_to_orbitals, params['orbital'])
+    ]
+    if options.complex_output:
+      # create imaginary orbitals
+      orbitals = [
+          orbital[..., ::2] + 1.0j * orbital[..., 1::2] for orbital in orbitals
+      ]
+
+    # Apply envelopes if required.
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      ae_channels = jnp.split(ae, active_spin_partitions, axis=0)
+      r_ae_channels = jnp.split(r_ae, active_spin_partitions, axis=0)
+      r_ee_channels = jnp.split(r_ee, active_spin_partitions, axis=0)
+      for i in range(len(active_spin_channels)):
+        orbitals[i] = orbitals[i] * options.envelope.apply(
+            ae=ae_channels[i],
+            r_ae=r_ae_channels[i],
+            r_ee=r_ee_channels[i],
+            **params['envelope'][i],
+        )
+
+    # Reshape into matrices.
+    shapes = [
+        (spin, -1, sum(nspins) if options.full_det else spin)
+        for spin in active_spin_channels
+    ]
+    orbitals = [
+        jnp.reshape(orbital, shape) for orbital, shape in zip(orbitals, shapes)
+    ]
+    orbitals = [jnp.transpose(orbital, (1, 0, 2)) for orbital in orbitals]
+    if options.full_det:
+      orbitals = [jnp.concatenate(orbitals, axis=1)]
+
+    # Optionally apply Jastrow factor for electron cusp conditions.
+    # Added pre-determinant for compatibility with pretraining.
+    n = options.determinants
+    if jastrow_apply is not None:
+        jastrow = jnp.exp(
+            jastrow_apply(r_ee, params['jastrow'], nspins) / sum(nspins)
+        )
+        orbitals[0] = jnp.reshape(
+            (1/n) * jastrow * jnp.sum(jnp.sum(orbitals[0][:, :n, :], axis=2), axis=1, keepdims=True),
+            (-1, 1, 1)
+        )
+    else:
+        # orbitals[0] = jnp.reshape(
+        #     (1/n) * jnp.sum(jnp.prod(orbitals[0][:, :, :n], axis=2), axis=1, keepdims=True),
+        #     (-1, 1, 1)
+        # )
+        orbitals[0] = jnp.reshape(
+            (1/n) * jnp.sum(jnp.sum(orbitals[0][:, :n, :], axis=2), axis=1, keepdims=True),
+            (-1, 1, 1)
+        )
+
+    return orbitals
+
+  return init, apply
+
+def make_orbitals_bosons_prod(
+    nspins: Tuple[int, int],
+    charges: jnp.ndarray,
+    options: BaseNetworkOptions,
+    equivariant_layers: Tuple[InitLayersFn, ApplyLayersFn],
+) -> ...:
+  """Returns init, apply pair for orbitals.
+
+  Args:
+    nspins: Tuple with number of spin up and spin down electrons.
+    charges: (atom) array of atomic nuclear charges.
+    options: Network configuration.
+    equivariant_layers: Tuple of init, apply functions for the equivariant
+      interaction part of the network.
+  """
+
+  equivariant_layers_init, equivariant_layers_apply = equivariant_layers
+
+  # Optional Jastrow factor.
+  jastrow_init, jastrow_apply = jastrows.get_jastrow(options.jastrow)
+
+  def init(key: chex.PRNGKey) -> ParamTree:
+    """Returns initial random parameters for creating orbitals.
+
+    Args:
+      key: RNG state.
+    """
+    key, subkey = jax.random.split(key)
+    params = {}
+    dims_orbital_in, params['layers'] = equivariant_layers_init(subkey)
+
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    nchannels = len(active_spin_channels)
+    if nchannels == 0:
+      raise ValueError('No electrons present!')
+
+    # How many spin-orbitals do we need to create per spin channel?
+    nspin_orbitals = []
+    num_states = max(options.states, 1)
+    for nspin in active_spin_channels:
+      if options.full_det:
+        # Dense determinant. Need N orbitals per electron per determinant.
+        norbitals = sum(nspins) * options.determinants * num_states
+      else:
+        # Spin-factored block-diagonal determinant. Need nspin orbitals per
+        # electron per determinant.
+        norbitals = nspin * options.determinants * num_states
+      if options.complex_output:
+        norbitals *= 2  # one output is real, one is imaginary
+      nspin_orbitals.append(norbitals)
+
+    # create envelope params
+    natom = charges.shape[0]
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      # Applied to output from final layer of 1e stream.
+      output_dims = dims_orbital_in
+    elif options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      # Applied to orbitals.
+      if options.complex_output:
+        output_dims = [nspin_orbital // 2 for nspin_orbital in nspin_orbitals]
+      else:
+        output_dims = nspin_orbitals
+    else:
+      raise ValueError('Unknown envelope type')
+    params['envelope'] = options.envelope.init(
+        natom=natom, output_dims=output_dims, ndim=options.ndim
+    )
+
+    # Jastrow params.
+    if jastrow_init is not None:
+      params['jastrow'] = jastrow_init()
+
+    # orbital shaping
+    orbitals = []
+    for nspin_orbital in nspin_orbitals:
+      key, subkey = jax.random.split(key)
+      orbitals.append(
+          network_blocks.init_linear_layer(
+              subkey,
+              in_dim=dims_orbital_in,
+              out_dim=nspin_orbital,
+              include_bias=options.bias_orbitals,
+          )
+      )
+    params['orbital'] = orbitals
+
+    return params
+
+  def apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Sequence[jnp.ndarray]:
+    """Forward evaluation of the Fermionic Neural Network up to the orbitals.
+
+    Args:
+      params: network parameter tree.
+      pos: The electron positions, a 3N dimensional vector.
+      spins: The electron spins, an N dimensional vector.
+      atoms: Array with positions of atoms.
+      charges: Array with atomic charges.
+
+    Returns:
+      One matrix (two matrices if options.full_det is False) that exchange
+      columns under the exchange of inputs of shape (ndet, nalpha+nbeta,
+      nalpha+nbeta) (or (ndet, nalpha, nalpha) and (ndet, nbeta, nbeta)).
+    """
+    ae, ee, r_ae, r_ee = construct_input_features(pos, atoms, ndim=options.ndim)
+    h_to_orbitals = equivariant_layers_apply(
+        params['layers'],
+        ae=ae,
+        r_ae=r_ae,
+        ee=ee,
+        r_ee=r_ee,
+        spins=spins,
+        charges=charges,
+    )
+
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      envelope_factor = options.envelope.apply(
+          ae=ae, r_ae=r_ae, r_ee=r_ee, **params['envelope']
+      )
+      h_to_orbitals = envelope_factor * h_to_orbitals
+    # Note split creates arrays of size 0 for spin channels without electrons.
+    h_to_orbitals = jnp.split(
+        h_to_orbitals, network_blocks.array_partitions(nspins), axis=0
+    )
+    # Drop unoccupied spin channels
+    h_to_orbitals = [h for h, spin in zip(h_to_orbitals, nspins) if spin > 0]
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    active_spin_partitions = network_blocks.array_partitions(
+        active_spin_channels
+    )
+    # Create orbitals.
+    orbitals = [
+        network_blocks.linear_layer(h, **p)
+        for h, p in zip(h_to_orbitals, params['orbital'])
+    ]
+    if options.complex_output:
+      # create imaginary orbitals
+      orbitals = [
+          orbital[..., ::2] + 1.0j * orbital[..., 1::2] for orbital in orbitals
+      ]
+
+    # Apply envelopes if required.
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      ae_channels = jnp.split(ae, active_spin_partitions, axis=0)
+      r_ae_channels = jnp.split(r_ae, active_spin_partitions, axis=0)
+      r_ee_channels = jnp.split(r_ee, active_spin_partitions, axis=0)
+      for i in range(len(active_spin_channels)):
+        orbitals[i] = orbitals[i] * options.envelope.apply(
+            ae=ae_channels[i],
+            r_ae=r_ae_channels[i],
+            r_ee=r_ee_channels[i],
+            **params['envelope'][i],
+        )
+
+    # Reshape into matrices.
+    shapes = [
+        (spin, -1, sum(nspins) if options.full_det else spin)
+        for spin in active_spin_channels
+    ]
+    orbitals = [
+        jnp.reshape(orbital, shape) for orbital, shape in zip(orbitals, shapes)
+    ]
+    orbitals = [jnp.transpose(orbital, (1, 0, 2)) for orbital in orbitals]
+    if options.full_det:
+      orbitals = [jnp.concatenate(orbitals, axis=1)]
+
+    # Optionally apply Jastrow factor for electron cusp conditions.
+    # Added pre-determinant for compatibility with pretraining.
+    n = options.determinants
+    if jastrow_apply is not None:
+        jastrow = jnp.exp(
+            jastrow_apply(r_ee, params['jastrow'], nspins) / sum(nspins)
+        )
+        orbitals[0] = jnp.reshape(
+            (1/n) * jastrow * jnp.sum(jnp.prod(orbitals[0][:, :, :n], axis=2), axis=1, keepdims=True),
+            (-1, 1, 1)
+        )
+    else:
+        orbitals[0] = jnp.reshape(
+            (1/n) * jnp.sum(jnp.prod(orbitals[0][:, :, :n], axis=2), axis=1, keepdims=True),
+            (-1, 1, 1)
+        )
+
+
+    return orbitals
+
+  return init, apply
 
 ## Excited States  ##
 

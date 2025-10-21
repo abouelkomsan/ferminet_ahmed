@@ -179,14 +179,18 @@ def find_all_translations_in_supercell(lattice, unit_cell_vectors, searchlimit=1
 
     translations, fractional_coords = jax.vmap(compute_translation)(grid_x, grid_y)
 
+    # Compute the phase corresponding to (-1)^(x * y)
+    phases = jnp.pi * (grid_x * grid_y % 2)
+
     # Filter translations where fractional coordinates are within [0, 1)
     valid_mask = jnp.logical_and(
         jnp.logical_and(0 <= fractional_coords[:, 0], fractional_coords[:, 0] < 1),
         jnp.logical_and(0 <= fractional_coords[:, 1], fractional_coords[:, 1] < 1),
     )
     valid_translations = translations[valid_mask]
+    valid_xy_pairs = jnp.stack([grid_x, grid_y], axis=1)[valid_mask]
 
-    return valid_translations
+    return valid_translations, valid_xy_pairs
 
 
 def construct_momeigstate(f, targetmom, mom_kwargs):
@@ -199,7 +203,9 @@ def construct_momeigstate(f, targetmom, mom_kwargs):
         unit_cell_vectors: Basis vectors of the unit cell.
 
     Returns:
-        A function `mom_eig_state` that computes the momentum eigenstate wavefunction.
+        A tuple containing:
+        - `new_log_network`: A function that computes the log of the momentum eigenstate wavefunction.
+        - `new_network`: A function that computes the phase and log of the absolute value of the momentum eigenstate wavefunction.
     """
     abs_lattice = mom_kwargs['abs_lattice']
     unit_cell_vectors = mom_kwargs['unit_cell_vectors']
@@ -254,8 +260,81 @@ def construct_momeigstate(f, targetmom, mom_kwargs):
             translated_psi_sum = jnp.sum(jnp.exp(phase_shifts + log_network_outputs))
             return jnp.log(translated_psi_sum) - jnp.log(translations.shape[0])  # Normalize
 
-    return new_log_network
+    # Define the new network that outputs phase and log of the absolute value
+    def new_network(params, pos, spins, atoms, charges):
+        log_psi = new_log_network(params, pos, spins, atoms, charges)
+        log_abs_value = log_psi.real  # Log of the absolute value
+        phase = log_psi.imag  # Phase
+        return phase, log_abs_value
+
+    return new_log_network, new_network
 
 
+# def construct_momeigstate(f, targetmom, mom_kwargs):
+#     """f(params, pos, spins, atoms, charges) -> (phase, logabs)  # single walker"""
 
+#     abs_lattice       = mom_kwargs['abs_lattice']
+#     unit_cell_vectors = mom_kwargs['unit_cell_vectors']
+#     ndim_cfg          = int(mom_kwargs.get('ndim', 2))  # keep as Python int for shapes
+
+#     lattice    = lattice_vecs(unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice)
+#     reciprocal = reciprocal_vecs(unit_cell_vectors[0], unit_cell_vectors[1],
+#                                  jnp.array([[1, 0], [0, 1]], dtype=jnp.float32))
+#     g1, g2, _, _, _ = g1g2(abs_lattice, reciprocal[:, 0], reciprocal[:, 1])
+#     klabels = kpoints(abs_lattice)
+
+#     # Unpack and canonicalize
+#     translations, _ = find_all_translations_in_supercell(lattice, unit_cell_vectors)
+#     translations = jax.lax.stop_gradient(jnp.asarray(translations, jnp.float32))        # (T, ndim)
+#     kvec         = jax.lax.stop_gradient(jnp.asarray(mn(klabels[targetmom], g1, g2),
+#                                                     jnp.float32))                        # (ndim,)
+#     phi = translations @ kvec                                                            # (T,)
+#     T   = int(translations.shape[0])  # static length for fori_loop
+#     logT = jnp.log(jnp.asarray(T, jnp.float32))
+
+#     def _project_single(params, pos, spins, atoms, charges):
+#         # pos: (N*ndim,)
+#         N   = pos.shape[0] // ndim_cfg
+#         pos2 = pos.reshape(N, ndim_cfg)
+
+#         def body(i, carry):
+#             m, Sr, Si = carry
+#             tvec = translations[i]           # (ndim,)
+#             th   = phi[i]                    # real
+#             flat = (pos2 + tvec).reshape(-1)
+
+#             @jax.checkpoint
+#             def eval_base(p, x, s, a, c):
+#                 # f returns (phase, logabs), both real tensors
+#                 return f(p, x, s, a, c)
+
+#             phase_i, logabs_i = eval_base(params, flat, spins, atoms, charges)
+#             theta = phase_i + th
+
+#             m_new     = jnp.maximum(m, logabs_i)
+#             scale_old = jnp.exp(m - m_new)
+#             scale_new = jnp.exp(logabs_i - m_new)
+#             Sr_new    = Sr * scale_old + scale_new * jnp.cos(theta)
+#             Si_new    = Si * scale_old + scale_new * jnp.sin(theta)
+#             return (m_new, Sr_new, Si_new)
+
+#         init = (jnp.array(-jnp.inf, jnp.float32),
+#                 jnp.array(0.0,      jnp.float32),
+#                 jnp.array(0.0,      jnp.float32))
+#         m, Sr, Si = jax.lax.fori_loop(0, T, body, init)
+
+#         phase  = jnp.arctan2(Si, Sr).astype(jnp.float32)
+#         logabs = (m + jnp.log(jnp.hypot(Sr, Si)) - logT).astype(jnp.float32)
+#         return phase, logabs
+
+#     # Complex logψ path: return jnp.complex64 using lax.complex
+#     def new_log_network(params, pos, spins, atoms, charges):
+#         phase, logabs = _project_single(params, pos, spins, atoms, charges)
+#         return jax.lax.complex(logabs, phase)  # complex logψ as a JAX array
+
+#     # Pair API if/where you need (phase, log|ψ|)
+#     def new_network(params, pos, spins, atoms, charges):
+#         return _project_single(params, pos, spins, atoms, charges)
+
+#     return new_log_network, new_network
 

@@ -27,6 +27,42 @@ from jax import numpy as jnp
 import numpy as np
 
 
+def apply_random_lattice_shifts(key: chex.PRNGKey, x1, lattice, move_width = 1):
+    """
+    Shift all electron positions by the same random lattice vector per batch element.
+    
+    Args:
+        key: JAX PRNGKey
+        x1: jnp.ndarray of shape (batch_size, N * d), where d = 2
+        lattice: jnp.ndarray of shape (2, 2) representing the lattice vectors as columns
+        move_width: width of lattice shifts
+
+    Returns:
+        x2: jnp.ndarray of shape (batch_size, N * d)
+    """
+    batch_size = x1.shape[0]
+    dim = lattice.shape[1]  # spatial dimension
+    # print(x1.shape)
+    num_electrons = x1.shape[1] // dim
+
+    # Step 1: Sample two random integers per batch element
+    key, subkey = jax.random.split(key)
+    normal_samples = move_width*jax.random.normal(key, shape=(batch_size, 2), dtype=jnp.float32)
+    random_ints = jnp.round(normal_samples).astype(jnp.int32)
+    # random_ints = jax.random.randint(subkey, shape=(batch_size, 2), minval=-move_width, maxval=move_width)
+
+    # Step 2: Compute random lattice shifts: (batch_size, 2)
+    shift_vectors = jnp.einsum('ij,kj->ki', lattice, random_ints)  # (2,2) x (batch_size, 2)ᵀ -> (batch_size, 2)
+    # print(shift_vectors.shape)
+    # Step 3: Tile shift vector across N electrons
+    tiled_shifts = jnp.tile(shift_vectors[:, None, :], (1, num_electrons, 1))  # (batch_size, N, 2)
+    reshaped_shifts = tiled_shifts.reshape((batch_size, num_electrons * dim))    # (batch_size, N*d)
+
+    # Step 4: Apply shifts
+    x2 = x1 + reshaped_shifts
+
+    return x2
+
 def _harmonic_mean(x, atoms):
   """Calculates the harmonic mean of each electron distance to the nuclei.
 
@@ -87,6 +123,8 @@ def mh_update(
     ndim=3,
     blocks=1,
     i=0,
+    enforce_symmetry_by_shift: str = 'none',
+    symmetry_shift_kwargs: dict = {'lattice': None, 'move_width': 1},
 ):
   """Performs one Metropolis-Hastings step using an all-electron move.
 
@@ -120,6 +158,8 @@ def mh_update(
   x1 = data.positions
   if atoms is None:  # symmetric proposal, same stddev everywhere
     x2 = x1 + stddev * jax.random.normal(subkey, shape=x1.shape)  # proposal
+    if enforce_symmetry_by_shift == 'lattice':
+      x2 = apply_random_lattice_shifts(key, x2, symmetry_shift_kwargs['lattice'], symmetry_shift_kwargs['move_width'])
     lp_2 = 2.0 * f(
         params, x2, data.spins, data.atoms, data.charges
     )  # log prob of proposal
@@ -159,6 +199,8 @@ def mh_block_update(
     ndim=3,
     blocks=1,
     i=0,
+    enforce_symmetry_by_shift: str = 'none',
+    symmetry_shift_kwargs: dict = {'lattice': None, 'move_width': 1}
 ):
   """Performs one Metropolis-Hastings step for a block of electrons.
 
@@ -222,7 +264,9 @@ def make_mcmc_step(batch_network,
                    steps=10,
                    atoms=None,
                    ndim=3,
-                   blocks=1):
+                   blocks=1,
+                   enforce_symmetry_by_shift = 'none',
+                   symmetry_shift_kwargs = {'lattice': None, 'move_width': 1}):
   """Creates the MCMC step function.
 
   Args:
@@ -268,7 +312,9 @@ def make_mcmc_step(batch_network,
           atoms=atoms,
           ndim=ndim,
           blocks=blocks,
-          i=i)
+          i=i,
+          enforce_symmetry_by_shift = enforce_symmetry_by_shift,
+          symmetry_shift_kwargs = symmetry_shift_kwargs)
 
     nsteps = steps * blocks
     logprob = 2.0 * batch_network(

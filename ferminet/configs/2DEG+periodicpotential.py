@@ -57,7 +57,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
     J_to_meV = 1 / 1.602176634e-22  # 1 J = this many meV
 
     # Energy in J at r = 1 nm
-    energy_J = e**2 / (4 * jnp.pi * epsilon_0 * epsilon_r * r_nm)
+    energy_J = e**2 / (4 * np.pi * epsilon_0 * epsilon_r * r_nm)
 
     # Convert to meV
     energy_meV = energy_J * J_to_meV
@@ -68,7 +68,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (4, 0)
+  cfg.system.electrons = (9, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -77,8 +77,10 @@ def get_config():
   cfg.pretrain.method = None
 
   """ Defining the potential unit cell and the supercell """
-  a1 = np.array([np.sqrt(3)/2,-0.5])
-  a2 = np.array([0,1])
+  a0 = 1.0
+  a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
+  #a1 = a0* np.array([1,0])
+  a2 = a0 * np.array([0,1])
   Tmatrix = np.array([[3,0], [0, 3]]) 
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
@@ -88,17 +90,35 @@ def get_config():
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
   print(KE_prefactor)
-  pp_coffs = np.array([200.0, 200.0, 200.0])  
+  pp_coffs = np .array([0.0, 0.0, 0.0])  
   pp_phases = np.array([0.0, 0.0, 0.0])
-
-  cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_periodicpotential.local_energy"
-  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx"},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases}}
+  epsilon = 1.0
+  intcoff = (coulomb_prefactor(epsilon))/KE_prefactor
+  print(epsilon)
+  cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_minimalChern.local_energy"
+  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases}}
   cfg.network.network_type = "psiformer"
   cfg.network.complex = True
-  cfg.network.psiformer.num_layers = 3
+  cfg.network.psiformer.num_layers = 4
+  cfg.network.psiformer.num_heads = 6
+  cfg.network.psiformer.heads_dim = 64
+  cfg.network.psiformer.mlp_hidden_dims  = (256,)
+  cfg.network.determinants = 4
   cfg.batch_size = 1024
-  cfg.optim.iterations = 3000
-  cfg.optim.lr.rate = 0.01
+  cfg.optim.iterations = 30000
+  cfg.optim.lr.rate = 0.05
+  #cfg.optim.lr.decay = 0.1
+  #cfg.optim.lr.delay = 1.0
+  cfg.mcmc.move_width = 2.0
+  #cfg.mcmc.init_width = 3.0
+  #cfg.mcmc.steps = 20
+  cfg.initialization.donor_filename = "none"
+  cfg.targetmom.mom = None
+
+  #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
+  #cfg.initialization.modifications = ['orbital-rnd']
+  #cfg.log.save_path = 'ferminet_2025_09_06_10:29:03'
+  cfg.log.save_frequency = 10
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {
@@ -110,3 +130,4 @@ def get_config():
   #cfg.network.make_envelope_kwargs = {"kpoints": kpoints}
   cfg.network.full_det = True
   return cfg
+

@@ -37,6 +37,8 @@ from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
 from ferminet.utils import writers
+from ferminet import surgery
+from ferminet import targetmom
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -45,6 +47,8 @@ import ml_collections
 import numpy as np
 import optax
 from typing_extensions import Protocol
+from datetime import datetime
+
 
 
 def _assign_spin_configuration(
@@ -508,9 +512,72 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         complex_output=use_complex,
         **cfg.network.psiformer,
     )
+  elif cfg.network.network_type == 'psiformer_magfield':
+    network = psiformer.make_fermi_net_magfield(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        magfield_kwargs = cfg.network.psiformer_magfield.kwargs,
+        **cfg.network.psiformer,
+    )
+  elif cfg.network.network_type == 'boson_net_sum':
+    network = psiformer.make_boson_net_sum(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        **cfg.network.psiformer,
+    )
+  elif cfg.network.network_type == 'boson_net_prod':
+    network = psiformer.make_boson_net_prod(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        **cfg.network.psiformer,
+    )
+  elif cfg.network.network_type == 'psiformer_momind':
+    network = psiformer.make_fermi_net_momentum_projected(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        momind = cfg.targetmom.mom,
+        mom_kwargs = cfg.targetmom.kwargs,
+        **cfg.network.psiformer,
+    )
   key, subkey = jax.random.split(key)
   params = network.init(subkey)
-  params = kfac_jax.utils.replicate_all_local_devices(params)
+  params = kfac_jax.utils.replicate_all_local_devices(params) #replicate network parameters accross all devices
   signed_network = network.apply
   # Often just need log|psi(x)|.
   if cfg.system.get('states', 0):
@@ -581,6 +648,54 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
      mcmc_width_ckpt,
      density_state_ckpt) = checkpoint.restore(
          ckpt_restore_filename, host_batch_size)
+  elif cfg.initialization.donor_filename != "none":
+    if os.path.isdir(cfg.initialization.donor_filename):
+      print("Donor directory exists:", cfg.initialization.donor_filename)
+    else:
+      print("WARNING at transfer initialization: Donor directory not found, directory: ", cfg.initialization.donor_filename)
+    ckpt_donor_filename = checkpoint.find_last_checkpoint(cfg.initialization.donor_filename)
+    logging.info(f"Transfer initialization from {ckpt_donor_filename}")
+    print(f"Transfer initialization from {ckpt_donor_filename}")
+    prng_key = jax.random.PRNGKey(22)
+    (donor_t_init,
+     donor_data,
+     params,
+     donor_opt_state_ckpt,
+     donor_mcmc_width_ckpt,
+     donor_density_state_ckpt) = surgery.transfer_initialization(cfg.initialization.flatten_num_devices,
+         ckpt_donor_filename, params, host_batch_size, prng_key, cfg.initialization.ignore_batch,
+         modifications=cfg.initialization.modifications,
+         modifications_kwargs=cfg.initialization.modifications_kwargs)
+    if cfg.initialization.randomize == True:
+      t_init = 0
+      opt_state_ckpt = None
+      mcmc_width_ckpt = None
+      density_state_ckpt = None
+      prng_key, subkey = jax.random.split(prng_key)
+      # make sure data on each host is initialized differently
+      subkey = jax.random.fold_in(subkey, jax.process_index())
+      # create electron state (position and spin)
+      pos, spins = init_electrons(
+          subkey,
+          cfg.system.molecule,
+          cfg.system.electrons,
+          batch_size=total_host_batch_size,
+          init_width=cfg.mcmc.init_width,
+          core_electrons=core_electrons,
+      )
+      pos = jnp.reshape(pos, data_shape + (-1,))
+      pos = kfac_jax.utils.broadcast_all_local_devices(pos)
+      spins = jnp.reshape(spins, data_shape + (-1,))
+      spins = kfac_jax.utils.broadcast_all_local_devices(spins)
+      data = networks.FermiNetData(
+          positions=pos, spins=spins, atoms=batch_atoms, charges=batch_charges
+      )
+    else:
+      t_init = 0
+      data = donor_data
+      mcmc_width_ckpt = donor_mcmc_width_ckpt
+      density_state_ckpt = donor_density_state_ckpt
+      opt_state_ckpt = donor_opt_state_ckpt
   else:
     logging.info('No checkpoint found. Training new model.')
     key, subkey = jax.random.split(key)
@@ -706,7 +821,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       steps=cfg.mcmc.steps,
       atoms=atoms_to_mcmc,
       blocks=cfg.mcmc.blocks * num_states,
-      ndim=cfg.system.ndim 
+      ndim=cfg.system.ndim,
+      enforce_symmetry_by_shift=cfg.mcmc.enforce_symmetry_by_shift,
+      symmetry_shift_kwargs = cfg.mcmc.symmetry_shift_kwargs
+      
   )
   # Construct loss and optimizer
   laplacian_method = cfg.optim.get('laplacian', 'default')
@@ -722,7 +840,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     local_energy_module = importlib.import_module(local_energy_module)
     make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
     local_energy_fn = make_local_energy(
-        f=signed_network,
+        f= signed_network,
         charges=charges,
         nspins=nspins,
         use_scan=False,
@@ -732,7 +850,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   else:
     pp_symbols = cfg.system.get('pp', {'symbols': None}).get('symbols')
     local_energy_fn = hamiltonian.local_energy(
-        f=signed_network,
+        f= signed_network,
         charges=charges,
         nspins=nspins,
         use_scan=False,
@@ -766,6 +884,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     local_energy = local_energy_fn
 
   if cfg.optim.objective == 'vmc':
+    #if cfg.targetmom.mom == None:
     evaluate_loss = qmc_loss_functions.make_loss(
         log_network if use_complex else logabs_network,
         local_energy,
@@ -775,6 +894,19 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         complex_output=use_complex,
         max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
     )
+    #else:
+    #  logging.info("Using momentum projected loss function for momentum %s", cfg.targetmom.mom)
+      # evaluate_loss = qmc_loss_functions.make_loss_momind(
+      #     log_network if use_complex else logabs_network,
+      #     local_energy,
+      #     momind = cfg.targetmom.mom,
+      #     mom_kwargs = cfg.targetmom.kwargs,
+      #     clip_local_energy=cfg.optim.clip_local_energy,
+      #     clip_from_median=cfg.optim.clip_median,
+      #     center_at_clipped_energy=cfg.optim.center_at_clip,
+      #     complex_output=use_complex,
+      #     max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
+      # )
   elif cfg.optim.objective == 'wqmc':
     evaluate_loss = qmc_loss_functions.make_wqmc_loss(
         log_network if use_complex else logabs_network,
@@ -809,9 +941,26 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     raise ValueError(f'Not a recognized objective: {cfg.optim.objective}')
 
   # Compute the learning rate
-  def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
-    return cfg.optim.lr.rate * jnp.power(
-        (1.0 / (1.0 + (t_/cfg.optim.lr.delay))), cfg.optim.lr.decay)
+  if cfg.optim.lr.onecycle is True:
+    def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
+      """One-cycle learning rate schedule."""
+      progress = t_ / cfg.optim.lr.onecycle_steps
+      lr_max = cfg.optim.lr.rate_max
+      lr_start = cfg.optim.lr.onecycle_start 
+      lr_end = cfg.optim.lr.onecycle_end 
+      def lr_onecycle_fn(progress):
+        """Learning rate schedule function."""
+        return jnp.where(
+            progress < 0.5,
+            lr_start + (lr_max - lr_start) * 2.0 * progress,
+            lr_max - (lr_max - lr_end) * (2.0 * progress - 1.0))
+      return jnp.where(t_ <= cfg.optim.lr.onecycle_steps,
+                       lr_onecycle_fn(progress),
+                       lr_end)
+  else:
+    def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
+      return cfg.optim.lr.rate * jnp.power(
+          (1.0 / (1.0 + (t_/cfg.optim.lr.delay))), cfg.optim.lr.decay)
 
   # Construct and setup optimizer
   if cfg.optim.optimizer == 'none':
@@ -938,8 +1087,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         params['state_scale'] = -state_scale  # pytype: disable=unsupported-operands
 
   if writer_manager is None:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')  # Format: YYYYMMDD_HHMMSS
     writer_manager = writers.Writer(
-        name='train_stats',
+        name = f'train_stats_{timestamp}',
         schema=train_schema,
         directory=ckpt_save_path,
         iteration_key=None,
@@ -993,7 +1143,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
               raise e
           else:
             raise e
-
+      # Break the loop if the loss is NaN or Inf to prevent further invalid computations
+      if np.isnan(loss) or np.isinf(loss):
+        break
       # Logging
       if t % cfg.log.stats_frequency == 0:
         logging_str = ('Step %05d: '

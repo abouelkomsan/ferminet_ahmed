@@ -141,7 +141,7 @@ def local_kinetic_energy(
   elif laplacian_method == 'folx':
     def _lapl_over_f(params, data):
       f_closure = lambda x: f(params, x, data.spins, data.atoms, data.charges)
-      f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=6)
+      f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=0)
       output = f_wrapped(data.positions)
       result = - (output[1].laplacian +
                   jnp.sum(output[1].jacobian.dense_array ** 2)) / 2
@@ -234,7 +234,7 @@ def excited_kinetic_energy_matrix(
     elif laplacian_method == 'folx':
       # CAUTION!! Only the first array of spins is being passed!
       f_closure = lambda x: f(params, x, spins_[0], data.atoms, data.charges)
-      f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=6)
+      f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=0)
       sign_out, log_out = folx.batched_vmap(f_wrapped, 1)(pos_)
       log_mat = log_out.x
       lapl = -(log_out.laplacian +
@@ -417,7 +417,7 @@ def local_energy(
         pos_ = jnp.reshape(data.positions, [states, -1])
         spins_ = jnp.reshape(data.spins, [states, -1])
         f_closure = lambda x: f(params, x, spins_[0], data.atoms, data.charges)
-        f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=6)
+        f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=0)
         sign_out, log_out = folx.batched_vmap(f_wrapped, 1)(pos_)
         kin = -(log_out.laplacian +
                 jnp.sum(log_out.jacobian.dense_array ** 2, axis=-2)) / 2

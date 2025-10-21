@@ -67,6 +67,11 @@ def default() -> ml_collections.ConfigDict:
               'rate': 0.05,  # learning rate
               'decay': 1.0,  # exponent of learning rate decay
               'delay': 10000.0,  # term that sets the scale of the rate decay
+              'onecycle' : False,
+              'onecycle_steps': 0,
+              'rate_max' : 0.0,
+              'onecycle_start' : 0.0,
+              'onecycle_end': 0.0,
           },
           # If greater than zero, scale (at which to clip local energy) in units
           # of the mean deviation from the mean.
@@ -219,11 +224,15 @@ def default() -> ml_collections.ConfigDict:
           # mean of the distance to the nuclei.
           'scale_by_nuclear_distance': False,
           'blocks': 1,  # Number of blocks to split the MCMC sampling into
+          'enforce_symmetry_by_shift': "none",
+          "symmetry_shift_kwargs": {},
+
       },
       'network': {
           'network_type': 'ferminet',  # One of 'ferminet' or 'psiformer'.
           # If true, the network outputs complex numbers rather than real.
           'complex': False,
+          'boson_log_scale': False,
           # Config specific to original FermiNet architecture.
           # Only used if network_type is 'ferminet'.
           'ferminet': {
@@ -271,6 +280,10 @@ def default() -> ml_collections.ConfigDict:
               'mlp_hidden_dims': (256,),
               'use_layer_norm': True,
           },
+          'psiformer_magfield': {
+              # PsiFormer architecture in magnetic_field: von Glehn, Spencer, Pfau, ICLR 2023.
+              'kwargs': {},  
+          },
           # Config common to all architectures.
           'determinants': 16,  # Number of determinants.
           'bias_orbitals': False,  # include bias in last layer to orbitals
@@ -294,6 +307,18 @@ def default() -> ml_collections.ConfigDict:
           # Same structure as make_feature_layer
           'make_envelope_fn': '',
           'make_envelope_kwargs': {},
+      },
+      'initialization': {
+        'donor_filename': '',
+        'modifications': [], # none, orbital-rnd
+        'modifications_kwargs': {}, # placeholder, unused
+        'flatten_num_devices': False,
+        'ignore_batch': False, 
+        'randomize': True,
+      },
+      'targetmom': {
+        'mom': None, #None or integer
+        'kwargs': {}, #keywords for lattice and vectors
       },
       'observables': {
           's2': False,  # spin magnitude

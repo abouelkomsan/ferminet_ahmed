@@ -1,7 +1,6 @@
-# Copyright 2025 Max Geier (MIT)
-# arXiv:2502.05383
+# Copyright 2025 Ahmed Abouelkomsan, Max Geier (MIT)
 
-"""Implementation of the 2DEG with periodic potential in arXiv:2502.05383
+"""Implementation of the 2DEG with periodic magnetic and periodic potential
 """
 
 import itertools
@@ -247,26 +246,98 @@ def make_cosine_potential(
 
     return potential
 
+# def make_vectorpotential(
+#     Bfield_lattice: jnp.ndarray,
+#     flux: jnp.ndarray,
+#     phase: jnp.ndarray,
+#     threadedflux: jnp.ndarray = jnp.array([0, 0])
+# ) -> Callable[[jnp.ndarray], jnp.ndarray]:
+#     """
+#     Creates a function to evaluate the vector potential
+
+#     Args:
+#         Bfield_lattice: Shape (2, 2). Matrix whose columns are the primitive lattice vectors.
+#         coefficients: Shape (3,). Coefficients for the three cosine terms.
+#         phases: Shape (3,). Phases for the three cosine terms.
+#         threadedflux: Shape (2,). Optional threading flux vector, defaults to zero.
+
+#     Returns:
+#         Callable with signature f(ae), where ae is a flattened array of atom-electron
+#         displacement vectors (shape (nelec * natom, 2)), which evaluates the vector potential and returns a vector.
+#     """
+#     # Compute reciprocal lattice vectors
+#     rec = 2 * jnp.pi * jnp.linalg.inv(Bfield_lattice)
+#     Glist = jnp.array([rec[0,:], rec[1,:], rec[0,:] - rec[1,:], -rec[0,:], -rec[1,:], -rec[0,:] + rec[1,:]])
+    
+#     # Precompute norms and coefficients for speed
+#     Gcoeff_x = 1.0j * Glist[:, 1] * flux
+#     Gcoeff_y = -1.0j * Glist[:, 0] * flux
+
+#     # Define the vector potential component function
+#     def vector_potential_comp(r: jnp.ndarray) -> jnp.ndarray:
+#         # Compute dot products for all G vectors at once
+#         dot_products = jnp.dot(Glist, r)
+#         exp_terms = jnp.exp(1.0j * dot_products + phase) 
+
+#         # Compute outx and outy using vectorized operations
+#         outx = jnp.sum(exp_terms * Gcoeff_x)
+#         outy = jnp.sum(exp_terms * Gcoeff_y)
+#         return jnp.array([jnp.real(outx), jnp.real(outy)])
+
+#     # Vectorize the component function using jax.vmap
+#     vectorized_potential_comp = jax.vmap(vector_potential_comp)
+#     def threadedflux_comp(r: jnp.ndarray) -> jnp.ndarray:
+#         """
+#         Computes the threaded flux contribution to the vector potential.
+
+#         Args:
+#             r: Shape (nelec, 2). 
+
+#         Returns:
+#             The threaded flux contribution as a vector of shape (nelec, 2).
+#         """
+#         return jnp.array([threadedflux[0] * r[:, 1], threadedflux[1] * r[:, 0]]).T
+#     # Define the vector potential function
+#     def potential(ae: jnp.ndarray) -> jnp.ndarray:
+#         """
+#         Evaluates the vector potential using atom-electron displacement vectors.
+
+#         Args:
+#             ae: Shape (nelec , natom, 2). Array of atom-electron displacement vectors.
+
+#         Returns:
+#             The vector potential as a vector of shape (nelec, 2)
+#         """
+#         # Reshape `ae` to (nelec * natom, 2) if necessary
+#         ae = jnp.reshape(ae, (-1, 2))
+#         return vectorized_potential_comp(ae),jnp.reshape(vectorized_potential_comp(ae), (-1,))
+
+#     return potential
+
 def make_vectorpotential(
     Bfield_lattice: jnp.ndarray,
     flux: jnp.ndarray,
     phase: jnp.ndarray,
-) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    threadedflux: jnp.ndarray = jnp.array([0, 0])
+) -> Callable[[jnp.ndarray], Tuple[jnp.ndarray, jnp.ndarray]]:
     """
-    Creates a function to evaluate the vector potential
+    Creates a function to evaluate the vector potential.
 
     Args:
         Bfield_lattice: Shape (2, 2). Matrix whose columns are the primitive lattice vectors.
-        coefficients: Shape (3,). Coefficients for the three cosine terms.
-        phases: Shape (3,). Phases for the three cosine terms.
+        flux: Shape (3,). Coefficients for the three cosine terms.
+        phase: Shape (3,). Phases for the three cosine terms.
+        threadedflux: Shape (2,). Constant threaded flux vector, defaults to zero.
 
     Returns:
         Callable with signature f(ae), where ae is a flattened array of atom-electron
-        displacement vectors (shape (nelec * natom, 2)), which evaluates the vector potential and returns a vector.
+        displacement vectors (shape (nelec * natom, 2)), which evaluates the vector potential and returns:
+            - The vector potential with shape (nelec * natom, 2).
+            - A flattened version of the vector potential with shape (nelec * natom * 2,).
     """
     # Compute reciprocal lattice vectors
     rec = 2 * jnp.pi * jnp.linalg.inv(Bfield_lattice)
-    Glist = jnp.array([rec[0,:], rec[1,:], rec[0,:] - rec[1,:], -rec[0,:], -rec[1,:], -rec[0,:] + rec[1,:]])
+    Glist = jnp.array([rec[0, :], rec[1, :], rec[0, :] - rec[1, :], -rec[0, :], -rec[1, :], -rec[0, :] + rec[1, :]])
     
     # Precompute norms and coefficients for speed
     Gcoeff_x = 1.0j * Glist[:, 1] * flux
@@ -274,9 +345,18 @@ def make_vectorpotential(
 
     # Define the vector potential component function
     def vector_potential_comp(r: jnp.ndarray) -> jnp.ndarray:
+        """
+        Computes the vector potential components for a given position vector.
+
+        Args:
+            r: Shape (2,). A single position vector.
+
+        Returns:
+            The vector potential components as a 2D vector.
+        """
         # Compute dot products for all G vectors at once
         dot_products = jnp.dot(Glist, r)
-        exp_terms = jnp.exp(1.0j * dot_products + phase) 
+        exp_terms = jnp.exp(1.0j * dot_products + phase)
 
         # Compute outx and outy using vectorized operations
         outx = jnp.sum(exp_terms * Gcoeff_x)
@@ -287,22 +367,28 @@ def make_vectorpotential(
     vectorized_potential_comp = jax.vmap(vector_potential_comp)
 
     # Define the vector potential function
-    def potential(ae: jnp.ndarray) -> jnp.ndarray:
+    def potential(ae: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Evaluates the vector potential using atom-electron displacement vectors.
 
         Args:
-            ae: Shape (nelec , natom, 2). Array of atom-electron displacement vectors.
+            ae: Shape (nelec, natom, 2). Array of atom-electron displacement vectors.
 
         Returns:
-            The vector potential as a vector of shape (nelec, 2)
+            - The vector potential as a vector of shape (nelec * natom, 2).
+            - A flattened version of the vector potential with shape (nelec * natom * 2,).
         """
         # Reshape `ae` to (nelec * natom, 2) if necessary
         ae = jnp.reshape(ae, (-1, 2))
-        return vectorized_potential_comp(ae),jnp.reshape(vectorized_potential_comp(ae), (-1,))
-
+        # Compute the vector potential and add the constant threaded flux
+        vector_potential = vectorized_potential_comp(ae)
+        N = vector_potential.shape[0] 
+        threadedflux_expanded = np.tile(threadedflux, (N, 1))  # Shape (N, 2)
+        vector_potential = vector_potential + threadedflux_expanded
+        # Return both the vector potential and its flattened version
+        return vector_potential, jnp.reshape(vector_potential, (-1,))
+  
     return potential
-
 
 
 gradient_Avec_energy = Callable[
@@ -438,7 +524,7 @@ def local_energy(
     )
 
  # periodic_potential_energy = make_cosine_potential(periodic_lattice,periodic_potential_kwargs['coefficients'], periodic_potential_kwargs['phases'])
-  vector_potential = make_vectorpotential(periodic_lattice,jnp.array((-0.23)),jnp.array(0.0))
+  vector_potential = make_vectorpotential(periodic_lattice,jnp.array(Bfield_kwargs['flux']),jnp.array(0.0),jnp.array(Bfield_kwargs['threadedflux']))
   grad_func = local_gradient(f)
   def _e_l(
         params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData
@@ -453,17 +539,112 @@ def local_energy(
     del key  # unused
     ae, ee, _, _ = networks.construct_input_features(
         data.positions, data.atoms, ndim=2)
-   # potential = potential_energy(ae, ee)
+    potential = potential_energy(ae, ee)
    # periodic_potential = periodic_potential_energy(ae)
     kinetic = ke(params, data)
     gradf = grad_func(params,data)
     _,Avec_val = vector_potential(ae)
     #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
     #+ + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val)
-    return  kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val) , None
+    return potential + kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)  , None
   return _e_l
 
+def local_energy_enforce_real(
+    f: networks.FermiNetLike,
+    charges: jnp.ndarray,
+    nspins: Sequence[int],
+    use_scan: bool = False,
+    complex_output: bool = False,
+    states: int = 0,
+    lattice: Optional[jnp.ndarray] = None,
+    kinetic_energy_kwargs = {},
+    Bfield_lattice: Optional[jnp.ndarray] = None,
+    Bfield_kwargs = {},
+    periodic_lattice: Optional[jnp.ndarray] = None,
+    periodic_potential_kwargs = {},
+    heg: bool = True,
+    convergence_radius: int = 10,
+    potential_type = 'Coulomb',
+    potential_kwargs = {}
+) -> hamiltonian.LocalEnergy:
+  """Creates the local energy function in periodic boundary conditions.
 
+  Args:
+    f: Callable which returns the sign and log of the magnitude of the
+      wavefunction given the network parameters and configurations data.
+    charges: Shape (natoms). Nuclear charges of the atoms.
+    nspins: Number of particles of each spin.
+    use_scan: Whether to use a `lax.scan` for computing the laplacian.
+    complex_output: If true, the output of f is complex-valued.
+    states: Number of excited states to compute. Not implemented, only present
+      for consistency of calling convention.
+    lattice: Shape (ndim, ndim). Matrix of lattice vectors. Default: identity
+      matrix.
+    kinetic_energy_kwargs: kwargs for the kinetic energy function.
+    periodic_lattice: Shape (ndim, ndim). Matrix of lattice vectors of the unit cell of the periodic potential.
+    heg: bool. Flag to enable features specific to the electron gas.
+    convergence_radius: int. Radius of cluster summed over by Ewald sums.
+    potential_type: specifies the type of ee potential to use.
+    potential_kwargs: kwargs for the ee potential
+
+  Returns:
+    Callable with signature e_l(params, key, data) which evaluates the local
+    energy of the wavefunction given the parameters params, RNG state key,
+    and a single MCMC configuration in data.
+  """
+  print("Using customized local_energy from pbc.hamiltonian ")
+  if states:
+    raise NotImplementedError('Excited states not implemented with PBC.')
+  del nspins
+  assert lattice is not None, "pbc.hamiltonian.local_energy requires lattice to be passed"
+
+  ke = hamiltonian.local_kinetic_energy(f, use_scan=use_scan,
+                                        complex_output=complex_output,
+                                        laplacian_method=potential_kwargs['laplacian_method'])
+
+  if potential_type == "Coulomb":
+    # Coulomb e-e interaction potential. 
+    # Optionally, specify interaction_energy_scale as an overall factor.
+    # WARNING: Jastrow factors assume interaction_energy_scale = 1
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+
+    potential_energy = make_2DCoulomb_potential(
+        lattice, jnp.array([0.0]), charges, convergence_radius, interaction_energy_scale
+    )
+  elif potential_type == "Gaussian":
+     # Gaussian potential requires U, U_width to be specified in potential_kwargs
+     potential_energy = make_2DCoulomb_potential(
+        lattice, jnp.array([0.0]), charges, convergence_radius, potential_kwargs['U'], potential_kwargs['U_width']
+    )
+
+ # periodic_potential_energy = make_cosine_potential(periodic_lattice,periodic_potential_kwargs['coefficients'], periodic_potential_kwargs['phases'])
+  vector_potential = make_vectorpotential(periodic_lattice,jnp.array(Bfield_kwargs['flux']),jnp.array(0.0))
+  grad_func = local_gradient(f)
+  def _e_l(
+        params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData
+  ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+    """Returns the total energy.
+
+    Args:
+        params: network parameters.
+        key: RNG state.
+        data: MCMC configuration.
+    """
+    del key  # unused
+    ae, ee, _, _ = networks.construct_input_features(
+        data.positions, data.atoms, ndim=2)
+    potential = potential_energy(ae, ee)
+   # periodic_potential = periodic_potential_energy(ae)
+    kinetic = ke(params, data)
+    gradf = grad_func(params,data)
+    _,Avec_val = vector_potential(ae)
+    #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
+    #+ + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val)
+    return jnp.real(potential + kinetic  + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val))  , None
+  return _e_l
 """ Note to my self
 
 - The positions of the NN data.positions are flatten (Shape (nelectrons*ndim,))

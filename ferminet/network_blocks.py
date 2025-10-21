@@ -175,3 +175,31 @@ def logdet_matmul(
     phase_out = jnp.sign(result)
   log_out = jnp.log(jnp.abs(result)) + maxlogdet
   return phase_out, log_out
+
+def logdet_matmul_bosons(xs: Sequence[jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Computes the phase and the log of the absolute value of the sum of elements in xs.
+
+    Args:
+        xs: A sequence of arrays to sum in the log domain.
+
+    Returns:
+        A tuple containing:
+        - The phase as a unit-norm complex number or sign (if real).
+        - The log of the absolute value of the sum of all elements in xs.
+    """
+    # Flatten all arrays in xs and concatenate them into a single array
+    flattened_xs = jnp.concatenate([x.ravel() for x in xs])
+    
+    # Compute the sum of all elements
+    total_sum = jnp.sum(flattened_xs)
+    
+    # Compute the phase
+    if total_sum.dtype == jnp.complex64 or total_sum.dtype == jnp.complex128:
+        phase_out = jnp.angle(total_sum)  # For complex numbers
+    else:
+        phase_out = jnp.sign(total_sum)  # For real numbers
+    
+    # Compute the log of the absolute value
+    log_out = jnp.log(jnp.abs(total_sum))
+    
+    return phase_out, log_out

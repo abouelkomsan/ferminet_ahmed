@@ -18,6 +18,7 @@ import enum
 from typing import Any, Callable, Iterable, Mapping, Union
 
 import jax.numpy as jnp
+from absl import logging
 
 ParamTree = Union[jnp.ndarray, Iterable['ParamTree'], Mapping[Any, 'ParamTree']]
 
@@ -47,13 +48,13 @@ def _jastrow_ee(
 
   if r_ees_parallel.shape[0] > 0:
     jastrow_ee_par = jnp.sum(
-        jastrow_fun(r_ees_parallel, 0.25, params['ee_par'])
+        jastrow_fun(r_ees_parallel,0.33333, params['ee_par'])
     )
   else:
     jastrow_ee_par = jnp.asarray(0.0)
 
   if r_ees[0][1].shape[0] > 0:
-    jastrow_ee_anti = jnp.sum(jastrow_fun(r_ees[0][1], 0.5, params['ee_anti']))
+    jastrow_ee_anti = jnp.sum(jastrow_fun(r_ees[0][1],1.0, params['ee_anti']))
   else:
     jastrow_ee_anti = jnp.asarray(0.0)
 
@@ -67,6 +68,9 @@ def make_simple_ee_jastrow() -> ...:
       r: jnp.ndarray, cusp: float, alpha: jnp.ndarray
   ) -> jnp.ndarray:
     """Jastrow function satisfying electron cusp condition."""
+    #logging.debug(f"The shape of r is: {r.shape}")
+    #logging.debug(f"The shape of cusp is: {cusp.shape}")
+    #logging.debug(f"The shape of alpha is: {alpha.shape}")
     return -(cusp * alpha**2) / (alpha + r)
 
   def init() -> Mapping[str, jnp.ndarray]:
@@ -98,3 +102,5 @@ def get_jastrow(jastrow: JastrowType) -> ...:
     raise ValueError(f'Unknown Jastrow Factor type: {jastrow}')
 
   return jastrow_init, jastrow_apply
+
+
