@@ -68,7 +68,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (9, 0)
+  cfg.system.electrons = (1, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -81,7 +81,7 @@ def get_config():
   a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
   #a1 = a0* np.array([1,0])
   a2 = a0 * np.array([0,1])
-  Tmatrix = np.array([[3,0], [0, 3]]) 
+  Tmatrix = np.array([[2,0], [0, 2]]) 
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
@@ -90,12 +90,12 @@ def get_config():
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
   print(KE_prefactor)
-  pp_coffs = np .array([0.0, 0.0, 0.0])  
+  pp_coffs = np .array([30.0, 30.0, 30.0])  
   pp_phases = np.array([0.0, 0.0, 0.0])
   epsilon = 1.0
   intcoff = (coulomb_prefactor(epsilon))/KE_prefactor
   print(epsilon)
-  cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_minimalChern.local_energy"
+  cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_periodicpotential.local_energy"
   cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases}}
   cfg.network.network_type = "psiformer"
   cfg.network.complex = True
@@ -131,3 +131,13 @@ def get_config():
   cfg.network.full_det = True
   return cfg
 
+# a0 = 1.0
+# a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
+# #a1 = a0* np.array([1,0])
+# a2 = a0 * np.array([0,1])
+# Tmatrix = np.array([[2,0], [0, 2]]) 
+# lattice = lattice_vecs(a1, a2, Tmatrix)
+# potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
+# print(lattice)
+# rec = 2 * np.pi * np.linalg.inv(potential_lattice)
+# print(rec)

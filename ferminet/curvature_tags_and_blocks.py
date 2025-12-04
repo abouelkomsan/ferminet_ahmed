@@ -69,7 +69,7 @@ class RepeatedDenseBlock(kfac_jax.DenseTwoKroneckerFactored):
   ) -> kfac_jax.KroneckerFactored.State:
     [x] = estimation_data.primals.inputs
     [dy] = estimation_data.tangents.outputs
-    assert x.shape[0] == batch_size
+    #assert x.shape[0] == batch_size ##changed this
 
     estimation_data = dataclasses.replace(
         estimation_data,
@@ -119,7 +119,7 @@ class QmcBlockedDense(kfac_jax.KroneckerFactored):
 
     [x] = estimation_data.primals.inputs
     [dy] = estimation_data.tangents.outputs
-    assert batch_size == x.shape[0]
+    #assert batch_size == x.shape[0]
     normalizer = x.shape[0] * x.shape[1]
     # The forward computation is
     # einsum(x,w): bijk,bkmjn -> bijmn

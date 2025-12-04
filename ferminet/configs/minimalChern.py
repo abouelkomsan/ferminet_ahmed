@@ -105,7 +105,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (10, 0)
+  cfg.system.electrons = (8, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -118,7 +118,7 @@ def get_config():
   a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
   #a1 = a0* np.array([1,0])
   a2 = a0 * np.array([0,1])
-  Tmatrix = np.array([[5,0], [0, 6]]) 
+  Tmatrix = np.array([[4,0], [0, 6]]) 
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
@@ -133,7 +133,7 @@ def get_config():
   intcoff = (coulomb_prefactor(epsilon))/KE_prefactor
   print(epsilon)
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_minimalChern.local_energy"
-  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": np.array([0,0])}}
+  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.26,"threadedflux": np.array([0,0])}}
   cfg.network.network_type = "psiformer"
   cfg.network.complex = True
   cfg.network.psiformer.num_layers = 4
@@ -143,15 +143,16 @@ def get_config():
   cfg.network.determinants = 4
   cfg.batch_size = 1024
   cfg.optim.iterations = 1000000
+  cfg.log.save_frequency = 40
   #cfg.optim.lr.onecycle = True
   #cfg.optim.lr.onecycle_steps = 300000
   #cfg.optim.lr.rate_max = 30.0
   #cfg.optim.lr.onecycle_start = 1.0
   #cfg.optim.lr.onecycle_end = 0.0001 
-  cfg.optim.lr.rate = 0.001
+  cfg.optim.lr.rate = 0.0001
   #cfg.optim.lr.decay = 0.0
-  cfg.optim.lr.delay = 1000000
   #cfg.optim.kfac.momentum = 0.2
+  cfg.optim.lr.rate = 0.001
   cfg.mcmc.enforce_symmetry_by_shift = "none"
   #cfg.mcmc.symmetry_shift_kwargs = {"lattice": lattice,'move_width': 1}
   #cfg.optim.lr.delay = 50000
@@ -159,16 +160,15 @@ def get_config():
   #cfg.mcmc.init_width = 3.0
   cfg.mcmc.steps = 30
   cfg.network.jastrow = 'none'
-  cfg.initialization.donor_filename = "/data/ahmed95/NN_minimalChern/ferminet_2025_10_30_10:02:53"
-  #cfg.initialization.modifications = ["orbital-rnd"]
+  cfg.initialization.donor_filename = "none"
   cfg.initialization.flatten_num_devices = False
   cfg.initialization.randomize = False
   cfg.initialization.ignore_batch = False
+  cfg.initialization.randomize = False
   cfg.targetmom.mom = None
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.save_path = 'ferminet_2025_09_08_15:31:46'
-  cfg.log.save_frequency = 40
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {

@@ -7,7 +7,6 @@
 #
 #SBATCH --time=48:00:00
 #SBATCH --partition=submit-gpu
-#SBATCH --constraint=[nvidia_a30|Tesla_v100]
 #SBATCH --gres=gpu:1
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=10000

@@ -14,7 +14,7 @@
 
 source ~/venv/ferminet313/bin/activate
 cd /work/submit/ahmed95/ferminet_ahmed/
-ferminet --config ferminet/configs/2DEG_rs.py 
+ferminet --config ferminet/configs/2DEG+periodicpotential.py
 #python ferminet/RDM.py
 
 

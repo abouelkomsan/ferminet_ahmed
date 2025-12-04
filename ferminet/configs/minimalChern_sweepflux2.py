@@ -111,7 +111,7 @@ def get_config(flux1,flux2,filename):
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
   rec = 2*np.pi*np.linalg.inv(lattice)
-  threadedflux = flux1*rec[0,:] + flux2*rec[1,:] 
+  threadedflux = flux1*rec[0,:] + flux2*rec[1,:] #observe a factor of one half
   """Defining KE, potential and interaction parameters"""
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
@@ -133,7 +133,7 @@ def get_config(flux1,flux2,filename):
   cfg.batch_size = 1024
   cfg.optim.iterations = 300000
   cfg.optim.lr.rate = 0.0001
-  #cfg.optim.lr.decay = 0.0
+  cfg.optim.lr.decay = 0.0
   #cfg.optim.lr.decay = 1.5
   #cfg.optim.lr.delay = 1.0
   #cfg.mcmc.move_width = 2.0

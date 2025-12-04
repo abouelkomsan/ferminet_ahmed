@@ -1,0 +1,327 @@
+I1120 17:02:44.965430 139724692554432 main.py:34] System config:
+
+batch_size: 1024
+config_module: ferminet.base_config
+debug:
+  check_nan: false
+  deterministic: false
+initialization:
+  donor_filename: none
+  flatten_num_devices: false
+  ignore_batch: false
+  modifications: []
+  modifications_kwargs: {}
+  randomize: true
+log:
+  features: false
+  local_energies: false
+  restore_path: ''
+  save_frequency: 10.0
+  save_path: ''
+  stats_frequency: 1
+  walkers: false
+mcmc:
+  adapt_frequency: 100
+  blocks: 1
+  burn_in: 100
+  enforce_symmetry_by_shift: none
+  init_means: !!python/tuple []
+  init_width: 1.0
+  move_width: 2.0
+  num_leapfrog_steps: 10
+  project_to_supercell: false
+  scale_by_nuclear_distance: false
+  steps: 10
+  symmetry_shift_kwargs: {}
+  use_hmc: false
+network:
+  bias_orbitals: false
+  boson_log_scale: false
+  complex: true
+  determinants: 4
+  ferminet:
+    electron_nuclear_aux_dims: !!python/tuple []
+    hidden_dims: !!python/tuple
+    - &id001 !!python/tuple
+      - 256
+      - 32
+    - *id001
+    - *id001
+    - *id001
+    nuclear_embedding_dim: 0
+    schnet_electron_electron_convolutions: !!python/tuple []
+    schnet_electron_nuclear_convolutions: !!python/tuple []
+    separate_spin_channels: false
+    use_last_layer: false
+  full_det: true
+  jastrow: none
+  jastrow_kwargs:
+    interaction_strength: 1.0
+    ndim: 2
+  make_envelope_fn: ferminet.envelopes.make_null_envelope
+  make_envelope_kwargs: {}
+  make_feature_layer_fn: ferminet.pbc.feature_layer.make_pbc_feature_layer
+  make_feature_layer_kwargs:
+    include_r_ae: false
+    lattice: &id002 !!python/object/apply:numpy._core.multiarray._reconstruct
+      args:
+      - &id003 !!python/name:numpy.ndarray ''
+      - !!python/tuple
+        - 0
+      - !!binary |
+        Yg==
+      state: !!python/tuple
+      - 1
+      - !!python/tuple
+        - 2
+        - 2
+      - &id004 !!python/object/apply:numpy.dtype
+        args:
+        - f8
+        - false
+        - true
+        state: !!python/tuple
+        - 3
+        - <
+        - null
+        - null
+        - null
+        - -1
+        - -1
+        - 0
+      - false
+      - !!binary |
+        qkxY6Hq2+z8AAAAAAAAAAAAAAAAAAPC/AAAAAAAAAEA=
+  network_type: psiformer
+  psiformer:
+    heads_dim: 64
+    mlp_hidden_dims: !!python/tuple
+    - 256
+    num_heads: 6
+    num_layers: 4
+    use_layer_norm: true
+  psiformer_magfield:
+    kwargs: {}
+  rescale_inputs: false
+observables:
+  density: false
+  density_basis: def2-tzvpd
+  dipole: false
+  s2: false
+optim:
+  adam:
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-08
+    eps_root: 0.0
+  center_at_clip: true
+  clip_local_energy: 5.0
+  clip_median: false
+  iterations: 30000
+  kfac:
+    cov_ema_decay: 0.95
+    cov_update_every: 1
+    damping: 0.001
+    invert_every: 1
+    l2_reg: 0.0
+    mean_center: true
+    min_damping: 0.0001
+    momentum: 0.0
+    momentum_type: regular
+    norm_constraint: 0.001
+    register_only_generic: false
+  laplacian: default
+  lr:
+    decay: 1.0
+    delay: 10000.0
+    onecycle: false
+    onecycle_end: 0.0
+    onecycle_start: 0.0
+    onecycle_steps: 0
+    rate: 0.05
+    rate_max: 0.0
+  max_vmap_batch_size: 0
+  objective: vmc
+  optimizer: kfac
+  overlap:
+    penalty: 1.0
+    weights: null
+  reset_if_nan: false
+  spin_energy: 0.0
+  vmc_weight: 0.0
+pretrain:
+  basis: ccpvdz
+  excitation_type: ordered
+  iterations: 1000
+  method: null
+  scf_fraction: 1.0
+system:
+  electrons: !!python/tuple
+  - 1
+  - 0
+  make_local_energy_fn: ferminet.pbc.Hamiltonian_periodicpotential.local_energy
+  make_local_energy_kwargs:
+    heg: true
+    kinetic_energy_kwargs:
+      prefactor: 76.19964341336127
+    lattice: *id002
+    periodic_lattice: !!python/object/apply:numpy._core.multiarray._reconstruct
+      args:
+      - *id003
+      - !!python/tuple
+        - 0
+      - !!binary |
+        Yg==
+      state: !!python/tuple
+      - 1
+      - !!python/tuple
+        - 2
+        - 2
+      - *id004
+      - false
+      - !!binary |
+        qkxY6Hq26z8AAAAAAAAAAAAAAAAAAOC/AAAAAAAA8D8=
+    periodic_potential_kwargs:
+      coefficients: !!python/object/apply:numpy._core.multiarray._reconstruct
+        args:
+        - *id003
+        - !!python/tuple
+          - 0
+        - !!binary |
+          Yg==
+        state: !!python/tuple
+        - 1
+        - !!python/tuple
+          - 3
+        - *id004
+        - false
+        - !!binary |
+          AAAAAAAAPkAAAAAAAAAAAAAAAAAAAAAA
+      phases: !!python/object/apply:numpy._core.multiarray._reconstruct
+        args:
+        - *id003
+        - !!python/tuple
+          - 0
+        - !!binary |
+          Yg==
+        state: !!python/tuple
+        - 1
+        - !!python/tuple
+          - 3
+        - *id004
+        - false
+        - !!binary |
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    potential_kwargs:
+      interaction_energy_scale: 18.89726096680166
+      laplacian_method: folx
+  molecule:
+  - !!python/object:ferminet.utils.system.Atom
+    atomic_number: 0
+    charge: 0.0
+    coords: !!python/tuple
+    - 0.0
+    - 0.0
+    symbol: X
+    units: bohr
+  ndim: 2
+  pbc_lattice: null
+  pp:
+    basis: ccecp-cc-pVDZ
+    symbols: null
+    type: ccecp
+  pyscf_mol: null
+  set_molecule: null
+  states: 0
+  type: 1
+  units: bohr
+  use_pp: false
+targetmom:
+  kwargs: {}
+  mom: null
+
+I1120 17:02:44.981296 139724692554432 train.py:389] Starting QMC with 1 XLA devices per host across 1 hosts.
+I1120 17:02:51.300613 139724692554432 train.py:704] No checkpoint found. Training new model.
+Traceback (most recent call last):
+  File "/home/submit/ahmed95/venv/ferminet313/bin/ferminet", line 8, in <module>
+    sys.exit(main_wrapper())
+             ~~~~~~~~~~~~^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/main.py", line 40, in main_wrapper
+    app.run(main)
+    ~~~~~~~^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/absl/app.py", line 316, in run
+    _run_main(main, args)
+    ~~~~~~~~~^^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/absl/app.py", line 261, in _run_main
+    sys.exit(main(argv))
+             ~~~~^^^^^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/main.py", line 35, in main
+    train.train(cfg)
+    ~~~~~~~~~~~^^^^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/train.py", line 1008, in train
+    opt_state = optimizer.init(params, subkeys, data)
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/optimizer.py", line 1026, in init
+    return self._init(params, rng, batch, func_state)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/utils/staging.py", line 297, in decorated
+    outs = func(instance, *args, **kwargs)
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/optimizer.py", line 972, in _init
+    estimator_state=self.estimator.init(
+                    ~~~~~~~~~~~~~~~~~~~^
+        rng=rng,
+        ^^^^^^^^
+    ...<10 lines>...
+        cache_eigenvalues=False
+        ^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/utils/misc.py", line 342, in wrapped
+    return method(instance, *args, **kwargs)
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/curvature_estimator/block_diagonal.py", line 395, in init
+    self.finalize(func_args)
+    ~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/utils/misc.py", line 315, in finalize
+    self._finalize(*args, **kwargs)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/curvature_estimator/block_diagonal.py", line 380, in _finalize
+    self._jaxpr = self._jaxpr_extractor(func_args)
+                  ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/tracer.py", line 469, in get_processed_jaxpr
+    closed_jaxpr, _ = retrieve(func_args)
+                      ~~~~~~~~^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/tracer.py", line 435, in retrieve
+    processed_jaxpr = ProcessedJaxpr.make_from_func(
+        func=func,
+    ...<4 lines>...
+        **auto_registration_kwargs,
+    )
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/tracer.py", line 324, in make_from_func
+    func = tgm.auto_register_tags(
+        func=func,
+    ...<2 lines>...
+        **auto_registration_kwargs,
+    )
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/tag_graph_matcher.py", line 2072, in auto_register_tags
+    graph = make_jax_graph(
+        func=func,
+    ...<4 lines>...
+        clean_broadcasts=True,
+    )
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/tag_graph_matcher.py", line 356, in make_jax_graph
+    closed_jaxpr, out_shapes = jax.make_jaxpr(func, return_shape=True)(*func_args)
+                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/home/submit/ahmed95/venv/ferminet313/lib/python3.13/site-packages/kfac_jax/_src/optimizer.py", line 1730, in value_func
+    out, _ = value_and_grad_func(*args, **kwargs)
+             ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/loss.py", line 241, in total_energy_jvp
+    loss, aux_data = total_energy(params, key, data)
+                     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/loss.py", line 225, in total_energy
+    e_l, e_l_mat = batch_local_energy(params, keys, data)
+                   ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/work/submit/ahmed95/ferminet_ahmed/ferminet/pbc/Hamiltonian_periodicpotential.py", line 339, in _e_l
+    return kinetic + periodic_potential, None
+                     ^^^^^^^^^^^^^^^^^^
+NameError: name 'periodic_potential' is not defined
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

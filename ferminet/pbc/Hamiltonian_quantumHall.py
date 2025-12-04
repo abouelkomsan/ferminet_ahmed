@@ -18,6 +18,7 @@ from jax.debug import print as jprint
 from jax import lax
 from ferminet.utils import utils
 
+import logging
 
 def make_2DCoulomb_potential(
     lattice: jnp.ndarray,
@@ -198,6 +199,207 @@ def make_Gaussian_potential(
     phase_prim_ee = (phase_ee + 0.5)  % 1 - 0.5
     prim_ee = jnp.einsum('il,jkl->jki', lattice, phase_prim_ee)
     return jnp.real(electron_electron_potential(prim_ee))
+
+  return potential
+
+def make_MR_effective_potential(
+    lattice: jnp.ndarray,
+    atoms: jnp.ndarray,
+    charges: jnp.ndarray,
+    truncation_limit_coulomb: int = 5,
+    truncation_limit_short: int = 1,
+    interaction_energy_scale: float = 1.0,
+    a1: float = 117.429,
+    a2: float = -755.468,
+    alpha1: float = 1.3177,
+    alpha2: float = 2.9026,
+):
+  """Creates the effective real-space interaction V_eff(r) that reproduces
+  n=1 Coulomb pseudopotentials when projected to the LLL:
+
+      V_eff(r) = (e^2/eps) [ 1/r + a1 exp(-alpha1 r^2)
+                             + a2 r^2 exp(-alpha2 r^2) ].
+
+  Here the 1/r part is handled by the existing 2D Ewald Coulomb, and the
+  exponential corrections are added as a short-range periodic potential.
+
+  Args:
+    lattice: (2, 2) primitive lattice vectors as columns.
+    atoms, charges: unused (kept for API compatibility).
+    truncation_limit_coulomb: Ewald cutoff for 1/r Coulomb part.
+    truncation_limit_short: number of image shells for short-range terms.
+    interaction_energy_scale: overall prefactor (e^2/eps in your units).
+    a1, a2, alpha1, alpha2: parameters from the paper, assumed dimensionless
+        in units of the magnetic length.
+
+  Returns:
+    Callable potential(ae, ee) giving the total e-e interaction energy.
+  """
+  # Base Coulomb part (1/r + neutralizing background) via Ewald.
+  #from your_module import make_2DCoulomb_potential  # adjust import as needed
+
+  print(
+      "making MR effective potential with energy scale:",
+      interaction_energy_scale,
+      "and params:",
+      [a1, a2, alpha1, alpha2],
+  )
+
+  coulomb_potential = make_2DCoulomb_potential(
+      lattice=lattice,
+      atoms=atoms,
+      charges=charges,
+      truncation_limit=truncation_limit_coulomb,
+      interaction_energy_scale=interaction_energy_scale,
+  )
+
+  # --- Short-range correction part: a1 e^{-α1 r^2} + a2 r^2 e^{-α2 r^2} ---
+
+  # reciprocal lattice for mapping ee to first cell
+  rec = 2.0 * jnp.pi * jnp.linalg.inv(lattice)
+
+  # lattice translations for short-range real-space sum
+  ordinals = sorted(range(-truncation_limit_short,
+                          truncation_limit_short + 1), key=abs)
+  ordinals = jnp.array(list(itertools.product(ordinals, repeat=2)))
+  lat_vectors = jnp.einsum("kj,ij->ik", lattice, ordinals)
+
+  def short_real_space_potential(separation: jnp.ndarray) -> jnp.ndarray:
+    """Short-range part between two electrons with displacement `separation`
+    (in real space), including periodic images."""
+    # displacements to all lattice images
+    displacements = jnp.linalg.norm(separation - lat_vectors, axis=-1)  # |r - R|
+    r2 = displacements**2
+
+    # Avoid numerical issues at r = 0; the diagonal (i=j) is removed later anyway,
+    # but we keep a tiny epsilon here to be safe.
+    eps = 1e-12
+    r2_safe = jnp.where(r2 > eps**2, r2, eps**2)
+
+    term1 = a1 * jnp.exp(-alpha1 * r2_safe)
+    term2 = a2 * r2_safe * jnp.exp(-alpha2 * r2_safe)
+    return interaction_energy_scale * jnp.sum(term1 + term2)
+
+  batch_short_sum = jax.vmap(short_real_space_potential, in_axes=(0,))
+
+  def short_ee_potential(ee: jnp.ndarray) -> jnp.ndarray:
+    """Short-range correction to periodic e-e potential."""
+    nelec = ee.shape[0]
+    ee = jnp.reshape(ee, [-1, 2])  # (nelec^2, 2)
+    val = batch_short_sum(ee)
+    val = jnp.reshape(val, [nelec, nelec])
+    val = val.at[jnp.diag_indices(nelec)].set(0.0)
+    return 0.5 * jnp.sum(val)
+
+  def potential(ae: jnp.ndarray, ee: jnp.ndarray) -> jnp.ndarray:
+    """Total V_eff = V_Coulomb + short-range corrections."""
+    # 1/r part from Ewald Coulomb (already periodic + background corrected).
+    v_coul = coulomb_potential(ae, ee)
+
+    # Map relative distances back to first unit cell for short-range part
+    phase_ee = jnp.einsum("il,jkl->jki", rec / (2.0 * jnp.pi), ee)
+    phase_prim_ee = (phase_ee + 0.5) % 1.0 - 0.5
+    prim_ee = jnp.einsum("il,jkl->jki", lattice, phase_prim_ee)
+
+    v_short = jnp.real(short_ee_potential(prim_ee))
+
+    return v_coul + v_short
+
+  return potential
+
+def make_softCoulomb_potential(
+    lattice: jnp.ndarray,
+    atoms: jnp.ndarray,
+    charges: jnp.ndarray,
+    truncation_limit_coulomb: int = 5,
+    truncation_limit_short: int = 1,
+    interaction_energy_scale: float = 1.0,
+    lambda_soft: float = 1.0,
+):
+  """Creates periodic 'soft' Coulomb interaction
+
+      V(r) = (e^2/eps) / sqrt(r^2 + lambda_soft^2)
+
+  using 2D Ewald for the 1/r part plus a short-range real-space correction.
+
+  Args:
+    lattice: (2, 2) primitive lattice vectors as columns.
+    atoms, charges: unused (kept for API compatibility).
+    truncation_limit_coulomb: Ewald cutoff for pure 1/r Coulomb part.
+    truncation_limit_short: number of real-space image shells for the
+        short-range correction Σ_R [1/sqrt(|r-R|^2 + λ^2) - 1/|r-R|].
+    interaction_energy_scale: overall prefactor, e^2/eps in your units.
+    lambda_soft: softening length λ (in same units as lattice).
+
+  Returns:
+    Callable potential(ae, ee) giving the total e-e interaction energy.
+  """
+  del atoms, charges  # unused for HEG
+
+  print(
+      "making soft Coulomb (Ewald) potential with lambda =",
+      lambda_soft,
+      "energy scale =",
+      interaction_energy_scale,
+  )
+
+  # Base 1/r part via existing Ewald implementation (includes background).
+  coulomb_potential = make_2DCoulomb_potential(
+      lattice=lattice,
+      atoms=jnp.zeros((0, 2)),  # dummy
+      charges=jnp.zeros((0,)),
+      truncation_limit=truncation_limit_coulomb,
+      interaction_energy_scale=interaction_energy_scale,
+  )
+
+  # Reciprocal lattice for mapping ee into the primitive cell
+  rec = 2.0 * jnp.pi * jnp.linalg.inv(lattice)
+
+  # Real-space lattice vectors for the short-range correction
+  ordinals = sorted(range(-truncation_limit_short,
+                          truncation_limit_short + 1), key=abs)
+  ordinals = jnp.array(list(itertools.product(ordinals, repeat=2)))  # (N, 2)
+  lat_vectors = jnp.einsum("kj,ij->ik", lattice, ordinals)  # (N, 2)
+
+  def short_real_space_correction(separation: jnp.ndarray) -> jnp.ndarray:
+    """Short-range correction ΔV(r) summed over images:
+       ΔV(r) = Σ_R [1/sqrt(|r-R|^2 + λ^2) - 1/|r-R|].
+    """
+    displacements = jnp.linalg.norm(separation - lat_vectors, axis=-1)
+    # Regularize extremely small distances (we never evaluate at r=0 self,
+    # but r ~ R can still be tiny numerically)
+    eps = 1e-12
+    d_safe = jnp.where(displacements > eps, displacements, eps)
+
+    v_soft = 1.0 / jnp.sqrt(d_safe**2 + lambda_soft**2)
+    v_coul = 1.0 / d_safe
+    # This is already short-ranged, so a small truncation_limit_short is OK.
+    return interaction_energy_scale * jnp.sum(v_soft - v_coul)
+
+  batch_short_corr = jax.vmap(short_real_space_correction, in_axes=(0,))
+
+  def short_ee_correction(ee: jnp.ndarray) -> jnp.ndarray:
+    """Total short-range correction energy for all electrons."""
+    nelec = ee.shape[0]
+    ee = jnp.reshape(ee, [-1, 2])  # (nelec^2, 2)
+    corr = batch_short_corr(ee)
+    corr = jnp.reshape(corr, [nelec, nelec])
+    corr = corr.at[jnp.diag_indices(nelec)].set(0.0)
+    return 0.5 * jnp.sum(corr)
+
+  def potential(ae: jnp.ndarray, ee: jnp.ndarray) -> jnp.ndarray:
+    """Total soft Coulomb interaction energy."""
+    # 1/r part from Ewald
+    v_coul = coulomb_potential(ae, ee)
+
+    # Map separations to primitive cell for short-range correction
+    phase_ee = jnp.einsum("il,jkl->jki", rec / (2.0 * jnp.pi), ee)
+    phase_prim_ee = (phase_ee + 0.5) % 1.0 - 0.5
+    prim_ee = jnp.einsum("il,jkl->jki", lattice, phase_prim_ee)
+
+    v_corr = jnp.real(short_ee_correction(prim_ee))
+
+    return v_coul + v_corr
 
   return potential
 
@@ -569,10 +771,34 @@ def local_energy(
     )
   elif potential_type == "Gaussian":
      # Gaussian potential requires U, U_width to be specified in potential_kwargs
-     potential_energy = make_2DCoulomb_potential(
+    potential_energy = make_Gaussian_potential(
         lattice, jnp.array([0.0]), charges, convergence_radius, potential_kwargs['U'], potential_kwargs['U_width']
     )
-
+  elif potential_type == "LLL_MR_effective":
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+    potential_energy = make_MR_effective_potential(
+        lattice,
+        jnp.array([0.0]),
+        charges,
+        convergence_radius,
+        convergence_radius,
+        interaction_energy_scale)
+  elif potential_type == "softCoulomb":
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+    potential_energy = make_softCoulomb_potential(
+        lattice,
+        jnp.array([0.0]),
+        charges,
+        convergence_radius,
+        convergence_radius,
+        interaction_energy_scale,
+        potential_kwargs['lambda_soft'])
  # periodic_potential_energy = make_cosine_potential(periodic_lattice,periodic_potential_kwargs['coefficients'], periodic_potential_kwargs['phases'])
   vector_potential = symmetric_gauge_vector_potential()
   grad_func = local_gradient(f)
@@ -596,7 +822,9 @@ def local_energy(
     _,Avec_val = vector_potential(ae)
     #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
     #+ + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val)
-    return kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)  , None
+    #out = kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)
+    
+    return  potential + kinetic  + 1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)  , None
   return _e_l
 
 def local_energy_enforce_real(
@@ -666,7 +894,7 @@ def local_energy_enforce_real(
     )
   elif potential_type == "Gaussian":
      # Gaussian potential requires U, U_width to be specified in potential_kwargs
-     potential_energy = make_2DCoulomb_potential(
+     potential_energy = make_Gaussian_potential(
         lattice, jnp.array([0.0]), charges, convergence_radius, potential_kwargs['U'], potential_kwargs['U_width']
     )
 
@@ -692,8 +920,8 @@ def local_energy_enforce_real(
     gradf = grad_func(params,data)
     _,Avec_val = vector_potential(ae)
     #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
-    #+ + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val)
-    return jnp.real(kinetic  + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val))  , None
+    #jnp.real(kinetic  + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val))
+    return jnp.real(potential + kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val))  , None
   return _e_l
 """ Note to my self
 

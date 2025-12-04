@@ -168,6 +168,7 @@ def make_mlp() ->...:
     x = inputs
     for i in range(len(params)):
       x = jax.nn.gelu(network_blocks.linear_layer(x, **params[i]))
+      #x = jax.nn.silu(network_blocks.linear_layer(x, **params[i]))
     return x
 
   return init, apply
@@ -336,6 +337,7 @@ def make_fermi_net(
     envelope: Optional[envelopes.Envelope] = None,
     feature_layer: Optional[networks.FeatureLayer] = None,
     jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
     complex_output: bool = False,
     bias_orbitals: bool = False,
     rescale_inputs: bool = False,
@@ -345,6 +347,7 @@ def make_fermi_net(
     heads_dim: int,
     mlp_hidden_dims: Tuple[int, ...],
     use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
 ) -> networks.Network:
   """Psiformer with stacked Self Attention layers.
 
@@ -398,6 +401,7 @@ def make_fermi_net(
       envelope=envelope,
       feature_layer=feature_layer,
       jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
       complex_output=complex_output,
       bias_orbitals=bias_orbitals,
       full_det=True,  # Required for Psiformer.
@@ -407,6 +411,7 @@ def make_fermi_net(
       heads_dim=heads_dim,
       mlp_hidden_dims=mlp_hidden_dims,
       use_layer_norm=use_layer_norm,
+      pbc_lattice = pbc_lattice,
   )  # pytype: disable=wrong-keyword-args
 
   psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
@@ -464,7 +469,207 @@ def make_fermi_net(
   )
 
 
+def make_fermi_net_with_zero_projection(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = False,
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    # Psiformer-specific kwargs:
+    num_layers: int,
+    num_heads: int,
+    heads_dim: int,
+    mlp_hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
+    # New: number of holomorphic zeros per orbital used by the LLL envelope.
+    N_holo: int,
+) -> networks.Network:
+  """Psiformer with stacked Self Attention layers and NN-projected zeros.
 
+  Differences from make_fermi_net:
+    * Uses make_orbitals_with_zero_projection instead of the standard
+      make_orbitals.
+    * The PRE_DETERMINANT envelope (typically LLL) is still used, but its zeros
+      are *not* free parameters: they are supplied at apply-time from a linear
+      projection of the final equivariant features.
+  """
+
+  if envelope is None:
+    raise ValueError(
+        "make_fermi_net_with_zero_projection expects an explicit PRE_DETERMINANT "
+        "envelope (e.g. make_LLL_envelope_2d_trainable_zeros_mixed4)."
+    )
+
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection must be PRE_DETERMINANT."
+    )
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    if jastrow.upper() == 'DEFAULT':
+      jastrow = jastrows.JastrowType.SIMPLE_EE
+    else:
+      jastrow = jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,  # Required for Psiformer.
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )  # pytype: disable=wrong-keyword-args
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  # Use the modified orbital builder that ties zeros to the final layer.
+  orbitals_init, orbitals_apply = networks.make_orbitals_with_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Forward evaluation of the Psiformer with NN-projected zeros."""
+    orbitals = orbitals_apply(params, pos, spins, atoms, charges)
+    if options.states:
+      batch_logdet_matmul = jax.vmap(network_blocks.logdet_matmul, in_axes=0)
+      orbitals = [
+          jnp.reshape(orbital, (options.states, -1) + orbital.shape[1:])
+          for orbital in orbitals
+      ]
+      result = batch_logdet_matmul(orbitals)
+    else:
+      result = network_blocks.logdet_matmul(orbitals)
+    if 'state_scale' in params:
+      result = result[0], result[1] + params['state_scale']
+    return result
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
+
+def make_vortexformer(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = True,     # usually True for LLL/quasi-periodic phases
+    bias_orbitals: bool = False,     # unused here
+    rescale_inputs: bool = False,
+    num_layers: int = 2,
+    num_heads: int = 4,
+    heads_dim: int = 64,
+    mlp_hidden_dims: Tuple[int, ...] = (256,),
+    use_layer_norm: bool = False,
+    pbc_lattice: jnp.ndarray = None,
+    N_holo: int = 0,
+) -> networks.Network:
+  """Envelope-only Psiformer: determinants built purely from envelope factors whose zeros are NN-projected."""
+  if envelope is None:
+    raise ValueError("Provide a PRE_DETERMINANT LLL-like envelope.")
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError("Envelope must be PRE_DETERMINANT.")
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs)
+
+  if isinstance(jastrow, str):
+    jastrow = jastrows.JastrowType.SIMPLE_EE if jastrow.upper() == 'DEFAULT' else jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  # new orbital builder
+  orbitals_init, orbitals_apply = networks.make_orbitals_envelope_only_zero_projection(
+      nspins=nspins, charges=charges, options=options,
+      equivariant_layers=psiformer_layers, N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  def network_apply(params, pos, spins, atoms, charges):
+    orbitals = orbitals_apply(params, pos, spins, atoms, charges)
+    if options.states:
+      batch_logdet_matmul = jax.vmap(network_blocks.logdet_matmul, in_axes=0)
+      orbitals = [jnp.reshape(orb, (options.states, -1) + orb.shape[1:]) for orb in orbitals]
+      result = batch_logdet_matmul(orbitals)
+    else:
+      result = network_blocks.logdet_matmul(orbitals)
+    if 'state_scale' in params:
+      result = result[0], result[1] + params['state_scale']
+    return result
+
+  return networks.Network(
+      options=options, init=network_init, apply=network_apply, orbitals=orbitals_apply
+  )
 
 # def make_fermi_net_momentum_projected(
 #     nspins: Tuple[int, ...],
@@ -1296,10 +1501,6 @@ def make_fermi_net_magneticfield(
       for i in range(orbital_outputs.shape[0]):  # Loop over N_trans
           # Apply logdet_matmul to get phase and logdet
           phase, logdet = network_blocks.logdet_matmul([orbital_outputs[i]])
-          print(phase)
-          print(magnetic_phase[i])
-          print(phase_shifts[i])
-          print(cocycles[i])
           # Add the phase shift to the phase
           phase += phase_shifts[i]  + magnetic_phase[i] + cocycles[i]
 

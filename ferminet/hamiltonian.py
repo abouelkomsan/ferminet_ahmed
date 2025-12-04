@@ -27,6 +27,43 @@ import jax.numpy as jnp
 import numpy as np
 from typing_extensions import Protocol
 
+from folx import register_function, wrap_forward_laplacian
+
+# --------------------------
+# Elementwise remainder
+# --------------------------
+@jax.jit
+def rem_fn(x, y):
+    return x % y   # elementwise
+
+register_function(
+    jax.lax.rem_p,
+    wrap_forward_laplacian(rem_fn, in_axes=(0, 0))
+)
+
+# --------------------------
+# Elementwise floor
+# --------------------------
+@jax.jit
+def floor_fn(x):
+    return jnp.floor(x)
+
+register_function(
+    jax.lax.floor_p,
+    wrap_forward_laplacian(floor_fn, in_axes=())
+)
+
+# --------------------------
+# Elementwise round
+# --------------------------
+@jax.jit
+def round_fn(x):
+    return jnp.round(x)
+
+register_function(
+    jax.lax.round_p,
+    wrap_forward_laplacian(round_fn, in_axes=())
+)
 
 Array = Union[jnp.ndarray, np.ndarray]
 
