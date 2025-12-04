@@ -24,6 +24,21 @@ import argparse
 import os
 import logging
 import jax
+from jax.extend import backend as jbackend
+import sys
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+
+logging.basicConfig(
+    level=logging.INFO,  # Adjust the logging level as needed
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr  # Send logs to stderr
+)
+
+_backend = jbackend.get_backend()
+logging.info(f"Backend platform: {_backend.platform}")
+logging.info(f"Platform version: {getattr(_backend, 'platform_version', 'n/a')}")
+logging.info(f"Devices: {jax.devices()}")
 
 matmul_precision = 'float32' # 'F64_F64_F64', 'float32'
 logging.info(f"Setting jax_default_matmul_precision to {matmul_precision}")
@@ -96,7 +111,7 @@ def get_config(flux1,flux2,filename):
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
   rec = 2*np.pi*np.linalg.inv(lattice)
-  threadedflux = 0.5*(flux1*rec[0,:] + flux2*rec[1,:]) #observe a factor of one half
+  threadedflux = flux1*rec[0,:] + flux2*rec[1,:] 
   """Defining KE, potential and interaction parameters"""
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
@@ -116,9 +131,9 @@ def get_config(flux1,flux2,filename):
   cfg.network.psiformer.mlp_hidden_dims  = (256,)
   cfg.network.determinants = 4
   cfg.batch_size = 1024
-  cfg.optim.iterations = 30000
+  cfg.optim.iterations = 300000
   cfg.optim.lr.rate = 0.0001
-  cfg.optim.lr.decay = 0.0
+  #cfg.optim.lr.decay = 0.0
   #cfg.optim.lr.decay = 1.5
   #cfg.optim.lr.delay = 1.0
   #cfg.mcmc.move_width = 2.0
@@ -129,7 +144,7 @@ def get_config(flux1,flux2,filename):
   cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.restore_path = 'ferminet_2025_08_24_11:33:55 copy'
-  cfg.log.save_path = f"/work/submit/ahmed95/data/8particles_withflux2/{flux2}"
+  cfg.log.save_path = f"/data/ahmed95/NN_minimalChern/8particles_withflux2/{flux2}"
   cfg.log.save_frequency = 40
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")

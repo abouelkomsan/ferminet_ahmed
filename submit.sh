@@ -1,21 +1,6 @@
-#!/bin/bash
-#
-#SBATCH --job-name=ferminet
-#SBATCH --error=/work/submit/ahmed95/logs/err_%j.txt
-#SBATCH --output=/work/submit/ahmed95/logs/res_%j.txt
-
-#
-#SBATCH --time=48:00:00
-#SBATCH --partition=submit-gpu
-#SBATCH --constraint=[nvidia_a30|Tesla_v100]
-#SBATCH --gres=gpu:1
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=8192
-
-
-source ~/venv/ferminet313/bin/activate
-cd /work/submit/ahmed95/ferminet_ahmed/
-ferminet --config ferminet/configs/minimalChern2.py 
+source ~/venv/ferminet311_ahmed/bin/activate
+cd ~/ferminet_ahmed/
+ferminet --config ferminet/configs/minimalChern_testflux.py 
 #python ferminet/RDM.py
 
 
