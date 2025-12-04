@@ -333,8 +333,8 @@ def local_energy(
     ae, ee, _, _ = networks.construct_input_features(
         data.positions, data.atoms, ndim=2)
    # potential = potential_energy(ae, ee)
-    #periodic_potential = periodic_potential_energy(ae)
+    periodic_potential = periodic_potential_energy(ae)
     kinetic = ke(params, data)
     #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
-    return jnp.real(kinetic), None
+    return kinetic + periodic_potential, None
   return _e_l

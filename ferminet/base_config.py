@@ -196,6 +196,8 @@ def default() -> ml_collections.ConfigDict:
           'make_local_energy_fn': '',
           # Additional kwargs to pass into make_local_energy_fn.
           'make_local_energy_kwargs': {},
+          # If periodic boundary conditions are used, store lattice:
+          'pbc_lattice': None,
       },
       'mcmc': {
           # Note: HMC options are not currently used.
@@ -226,7 +228,7 @@ def default() -> ml_collections.ConfigDict:
           'blocks': 1,  # Number of blocks to split the MCMC sampling into
           'enforce_symmetry_by_shift': "none",
           "symmetry_shift_kwargs": {},
-
+          'project_to_supercell': False,
       },
       'network': {
           'network_type': 'ferminet',  # One of 'ferminet' or 'psiformer'.
@@ -292,6 +294,8 @@ def default() -> ml_collections.ConfigDict:
           # If specified, include a pre-determinant Jastrow factor.
           # One of 'default' (use network_type default), 'none', or 'simple_ee'.
           'jastrow': 'default',
+          # Additional kwargs for custom jastrow
+          'jastrow_kwargs': {'ndim': 2, "interaction_strength": 1.0}, 
           # If true, rescale the inputs so they grow as log(|r|)
           'rescale_inputs': False,
           # String set to module.make_feature_layer, where make_feature_layer is

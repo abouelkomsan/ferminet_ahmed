@@ -112,9 +112,9 @@ def get_config():
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
   eoverhbar = e_over_hbar()
-  flux1 = 0.25
-  flux2 = 0.0
-  threadedflux = 0.5*(flux1*rec[0,:] + flux2*rec[1,:]) #observe a factor of one half
+  flux1 = 0.0
+  flux2 = 1.0
+  threadedflux = flux1*rec[0,:] + flux2*rec[1,:] 
   """Defining KE, potential and interaction parameters"""
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
@@ -129,7 +129,7 @@ def get_config():
   cfg.network.network_type = "psiformer"
   cfg.network.complex = True
   cfg.network.psiformer.num_layers = 4
-  cfg.network.psiformer.num_heads = 4
+  cfg.network.psiformer.num_heads = 6
   cfg.network.psiformer.heads_dim = 64
   cfg.network.psiformer.mlp_hidden_dims  = (256,)
   cfg.network.determinants = 4
@@ -140,8 +140,8 @@ def get_config():
   #cfg.optim.lr.rate_max = 30.0
   #cfg.optim.lr.onecycle_start = 1.0
   #cfg.optim.lr.onecycle_end = 0.0001 
-  cfg.optim.lr.rate = 0.001
-  #cfg.optim.lr.decay = 0.0
+  cfg.optim.lr.rate = 0.00001
+  cfg.optim.lr.decay = 0.0
   #cfg.optim.kfac.momentum = 0.2
   cfg.mcmc.enforce_symmetry_by_shift = "none"
   #cfg.mcmc.symmetry_shift_kwargs = {"lattice": lattice,'move_width': 1}
@@ -150,7 +150,7 @@ def get_config():
   #cfg.mcmc.init_width = 3.0
   #cfg.mcmc.steps = 20
   cfg.network.jastrow = 'none'
-  cfg.initialization.donor_filename = "none"
+  cfg.initialization.donor_filename = "/work/submit/ahmed95/data/8particles_withflux2/1.0/"
   cfg.initialization.flatten_num_devices = False
   cfg.targetmom.mom = None
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
@@ -168,8 +168,10 @@ def get_config():
   #cfg.network.make_envelope_kwargs = {"kpoints": kpoints}
   cfg.network.full_det = True
     # New functionality: Create a timestamped folder and save the function body
-  timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
-  cfg.log.save_path = f'/work/submit/ahmed95/minimalChern_NN/ferminet_{timestamp}'
+  #timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
+  #cfg.log.save_path = f'/work/submit/ahmed95/minimalChern_NN/ferminet_{timestamp}'
+  cfg.log.save_path = '/work/submit/ahmed95/data/8particles_withflux3/1.0/'
+
   os.makedirs(cfg.log.save_path, exist_ok=True)
 
   # Get the body of the current function

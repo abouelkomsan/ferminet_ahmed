@@ -507,13 +507,15 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         envelope=envelope,
         feature_layer=feature_layer,
         jastrow=cfg.network.get('jastrow', 'default'),
+        jastrow_kwargs = cfg.network.jastrow_kwargs,
         bias_orbitals=cfg.network.bias_orbitals,
         rescale_inputs=cfg.network.get('rescale_inputs', False),
         complex_output=use_complex,
+        pbc_lattice = cfg.system.pbc_lattice,
         **cfg.network.psiformer,
     )
   elif cfg.network.network_type == 'psiformer_magfield':
-    network = psiformer.make_fermi_net_magfield(
+    network = psiformer.make_fermi_net_with_zero_projection(
         nspins,
         charges,
         ndim=cfg.system.ndim,
@@ -522,10 +524,30 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         envelope=envelope,
         feature_layer=feature_layer,
         jastrow=cfg.network.get('jastrow', 'default'),
+        jastrow_kwargs = cfg.network.jastrow_kwargs,
         bias_orbitals=cfg.network.bias_orbitals,
         rescale_inputs=cfg.network.get('rescale_inputs', False),
         complex_output=use_complex,
-        magfield_kwargs = cfg.network.psiformer_magfield.kwargs,
+        pbc_lattice = cfg.system.pbc_lattice,
+        N_holo = cfg.network.psiformer_magfield.kwargs['N_holo'],
+        **cfg.network.psiformer,
+    )
+  elif cfg.network.network_type == 'vortexformer':
+    network = psiformer.make_vortexformer(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        jastrow_kwargs = cfg.network.jastrow_kwargs,
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        pbc_lattice = cfg.system.pbc_lattice,
+        N_holo = cfg.network.psiformer_magfield.kwargs['N_holo'],
         **cfg.network.psiformer,
     )
   elif cfg.network.network_type == 'boson_net_sum':
@@ -691,7 +713,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
           positions=pos, spins=spins, atoms=batch_atoms, charges=batch_charges
       )
     else:
-      t_init = 0
+      t_init = donor_t_init
       data = donor_data
       mcmc_width_ckpt = donor_mcmc_width_ckpt
       density_state_ckpt = donor_density_state_ckpt
@@ -783,33 +805,30 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
   # Pretraining to match Hartree-Fock
 
-  if (
-      t_init == 0
-      and cfg.pretrain.method == 'hf'
-      and cfg.pretrain.iterations > 0
-  ):
-    pretrain_spins = spins[0, 0]
-    batch_orbitals = jax.vmap(
-        network.orbitals, in_axes=(None, 0, 0, 0, 0), out_axes=0
-    )
-    sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-    params, data.positions = pretrain.pretrain_hartree_fock(
-        params=params,
-        positions=data.positions,
-        spins=pretrain_spins,
-        atoms=data.atoms,
-        charges=data.charges,
-        batch_network=batch_network,
-        batch_orbitals=batch_orbitals,
-        network_options=network.options,
-        sharded_key=subkeys,
-        electrons=cfg.system.electrons,
-        scf_approx=hartree_fock,
-        iterations=cfg.pretrain.iterations,
-        batch_size=device_batch_size,
-        scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
-        states=cfg.system.states,
-    )
+  if t_init == 0 and cfg.pretrain.iterations > 0:
+    if cfg.pretrain.method == 'hf':
+      pretrain_spins = spins[0, 0]
+      batch_orbitals = jax.vmap(
+          network.orbitals, in_axes=(None, 0, 0, 0, 0), out_axes=0
+      )
+      sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+      params, data.positions = pretrain.pretrain_hartree_fock(
+          params=params,
+          positions=data.positions,
+          spins=pretrain_spins,
+          atoms=data.atoms,
+          charges=data.charges,
+          batch_network=batch_network,
+          batch_orbitals=batch_orbitals,
+          network_options=network.options,
+          sharded_key=subkeys,
+          electrons=cfg.system.electrons,
+          scf_approx=hartree_fock,
+          iterations=cfg.pretrain.iterations,
+          batch_size=device_batch_size,
+          scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
+          states=cfg.system.states,
+      )
 
   # Main training
 
@@ -823,8 +842,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       blocks=cfg.mcmc.blocks * num_states,
       ndim=cfg.system.ndim,
       enforce_symmetry_by_shift=cfg.mcmc.enforce_symmetry_by_shift,
-      symmetry_shift_kwargs = cfg.mcmc.symmetry_shift_kwargs
-      
+      symmetry_shift_kwargs = cfg.mcmc.symmetry_shift_kwargs,
+      project_to_supercell = cfg.mcmc.project_to_supercell,   
   )
   # Construct loss and optimizer
   laplacian_method = cfg.optim.get('laplacian', 'default')

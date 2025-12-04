@@ -345,3 +345,158 @@ def pretrain_hartree_fock(
     if logger:
       logger(t, loss[0])
   return params, data.positions
+
+
+# # In pretrain.py (or similar)
+
+# from typing import Callable, Tuple
+
+# import chex
+# import jax
+# import jax.numpy as jnp
+
+# from ferminet import constants
+# from ferminet import networks  # only for type hints, not strictly necessary
+
+# #ParamTree = networks.ParamTree  # for readability
+
+
+def pretrain_laughlin_vortexformer(
+    params: networks.ParamTree,
+    positions: jnp.ndarray,
+    *,
+    spins: jnp.ndarray,
+    atoms: jnp.ndarray,
+    charges: jnp.ndarray,
+    batch_signed_network: Callable[[networks.ParamTree, jnp.ndarray, jnp.ndarray,
+                                    jnp.ndarray, jnp.ndarray],
+                                   Tuple[jnp.ndarray, jnp.ndarray]],
+    laughlin_log_psi_fn: Callable[[jnp.ndarray], jnp.complexfloating],
+    iterations: int = 200,
+    learning_rate: float = 1e-3,
+) -> Tuple[networks.ParamTree, jnp.ndarray]:
+  """
+  Pretrain a vortexformer (envelope-only zero-projection) network by maximizing
+  the squared overlap with a reference Laughlin wavefunction.
+
+  Args:
+    params: Sharded network parameters (replicated on each device).
+    positions: Electron configurations with leading device axis.
+               Shape: (n_devices, batch_size, nelec * ndim).
+    spins: Spins, same leading axes as positions.
+           Shape: (n_devices, batch_size, nelec).
+    atoms: Atomic positions, typically broadcast over devices.
+           Shape: (n_devices, natoms, ndim) or (natoms, ndim) if broadcasting.
+    charges: Atomic charges, shape (n_devices, natoms) or (natoms,) if broadcasting.
+    batch_signed_network: vmapped network.apply over walkers,
+        signature:
+          (params, pos, spins, atoms, charges) -> (phase, logabs),
+        where phase and logabs are arrays of shape (batch_size,).
+        For complex_output=True, phase is the phase angle and logabs is log|ψ|.
+    laughlin_log_psi_fn: function that takes a single flattened position
+        (nelec*ndim,) and returns complex log amplitude log Ψ_L (on the torus).
+        We'll vmap this inside over the batch dimension.
+    iterations: Number of gradient descent steps for pretraining.
+    learning_rate: Pretraining learning rate (plain SGD).
+
+  Returns:
+    (new_params, overlaps), where:
+      new_params: pretrained parameters (same sharding as input).
+      overlaps: 1D array of shape (iterations,) on host with the estimated
+                squared overlap after each iteration (host-side, not sharded).
+  """
+
+  axis_name = constants.PMAP_AXIS_NAME
+
+  # Make sure atoms/charges are shaped with leading device axis, if needed.
+  # If they are unsharded (shape (natoms, ndim)), pmap will broadcast them.
+  # So we don't touch them here.
+
+  # Vectorized Laughlin log-psi over walkers.
+  @jax.jit
+  def _batch_laughlin_log_psi(pos_batch: jnp.ndarray) -> jnp.ndarray:
+    # pos_batch: (batch_size, nelec*ndim)
+    return jax.vmap(laughlin_log_psi_fn, in_axes=0, out_axes=0)(pos_batch)
+
+  # One pmapped update step.
+  @jax.pmap(axis_name=axis_name)
+  def _pretrain_step(
+      params_shard: networks.ParamTree,
+      pos_shard: jnp.ndarray,
+      spins_shard: jnp.ndarray,
+      atoms_shard: jnp.ndarray,
+      charges_shard: jnp.ndarray,
+  ):
+    """
+    One gradient step on -overlap^2. Runs independently on each device, then
+    averages gradients and overlap across devices using pmean/psum.
+    """
+
+    def loss_fn(p: networks.ParamTree):
+      # Network log-psi (complex) for this shard's batch.
+      phase, logabs = batch_signed_network(
+          p, pos_shard, spins_shard, atoms_shard, charges_shard
+      )  # each (batch_size,)
+      log_psi_net = logabs + 1j * phase
+
+      # Laughlin log-psi (complex) for the same batch.
+      log_psi_laughlin = _batch_laughlin_log_psi(pos_shard)  # (batch_size,)
+
+      # Ratio in log space.
+      delta = log_psi_net - log_psi_laughlin  # complex array, shape (batch_size,)
+
+      # Real shift for numerical stability (doesn't change overlap^2).
+      shift = jnp.max(jnp.real(delta))
+      delta_shifted = delta - shift
+
+      rho = jnp.exp(delta_shifted)  # shape (batch_size,)
+
+      # Local sums (to be globally reduced).
+      num_local = jnp.sum(rho)                # complex
+      den_local = jnp.sum(jnp.abs(rho)**2)    # real
+      count_local = rho.shape[0]              # int
+
+      # Global sums across devices.
+      num_global = jax.lax.psum(num_local, axis_name=axis_name)
+      den_global = jax.lax.psum(den_local, axis_name=axis_name)
+      count_global = jax.lax.psum(count_local, axis_name=axis_name)
+
+      # Global means.
+      count_global = count_global.astype(delta_shifted.dtype.real_dtype)
+      mean_rho = num_global / count_global
+      mean_rho2 = den_global / count_global
+
+      # Estimated squared overlap.
+      overlap_sq = (jnp.abs(mean_rho)**2) / (mean_rho2 + 1e-12)
+
+      # We want to maximize overlap_sq -> minimize -overlap_sq.
+      loss = -overlap_sq
+
+      return loss, overlap_sq
+
+    (loss, overlap_sq), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_shard)
+
+    # Average grads & metrics across devices.
+    grads = jax.lax.pmean(grads, axis_name=axis_name)
+    loss = jax.lax.pmean(loss, axis_name=axis_name)
+    overlap_sq = jax.lax.pmean(overlap_sq, axis_name=axis_name)
+
+    # Simple SGD update.
+    new_params_shard = jax.tree_map(
+        lambda p, g: p - learning_rate * g, params_shard, grads
+    )
+
+    return new_params_shard, loss, overlap_sq
+
+  # Host-side loop: track overlaps.
+  overlaps_host = []
+
+  cur_params = params
+  for it in range(iterations):
+    cur_params, loss_shard, overlap_shard = _pretrain_step(
+        cur_params, positions, spins, atoms, charges
+    )
+    # Grab scalar from one device (they're all equal after pmean).
+    overlaps_host.append(jax.device_get(overlap_shard[0]))
+
+  return cur_params, jnp.array(overlaps_host)
