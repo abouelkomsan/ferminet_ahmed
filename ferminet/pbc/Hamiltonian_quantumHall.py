@@ -718,7 +718,7 @@ def local_energy(
     periodic_lattice: Optional[jnp.ndarray] = None,
     periodic_potential_kwargs = {},
     heg: bool = True,
-    convergence_radius: int = 10,
+    convergence_radius: int = 20,
     potential_type = 'Coulomb',
     potential_kwargs = {}
 ) -> hamiltonian.LocalEnergy:

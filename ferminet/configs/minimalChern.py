@@ -27,6 +27,7 @@ from jax.extend import backend as jbackend
 import sys
 from ferminet import train
 
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 

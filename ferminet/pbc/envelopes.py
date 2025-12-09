@@ -2067,6 +2067,252 @@ def make_LLL_envelope_2d_trainable_zeros_mixed4(
 
   return envelopes.Envelope(envelopes.EnvelopeType.PRE_DETERMINANT, init, apply)
 
+def make_LLL_envelope_2d_trainable_zeros_mixed5(
+    lattice: jnp.ndarray,
+    elliptic_log_sigma=None,   # kept for API compatibility
+    z_scale: float = 1.0,
+    magfield_kwargs=None,
+    use_kfac_dense: bool = False,
+    kfac_dense_eps: float = 1e-4,
+) -> "envelopes.Envelope":
+  """
+  LLL-like envelope with per-orbital trainable holomorphic + anti-holomorphic zeros.
+
+  Same interface as your original version, but the `apply` is restructured to be
+  more memory-efficient: we avoid storing separate (ne, odim) arrays for holo and
+  anti sectors and build the log envelope electron-by-electron.
+  """
+  if magfield_kwargs is None:
+    magfield_kwargs = {}
+
+  # --- flux bookkeeping ---
+  N_phi  = int(magfield_kwargs["N_phi"])
+  N_holo = int(magfield_kwargs.get("N_holo", N_phi))
+  N_anti = int(magfield_kwargs.get("N_anti", 0))
+
+  assert N_holo - N_anti == N_phi, (
+      f"Require N_holo - N_anti == N_phi, got N_holo={N_holo}, "
+      f"N_anti={N_anti}, N_phi={N_phi}"
+  )
+
+  # --- geometry constants (shared) ---
+  L1 = lattice[:, 0].astype(jnp.float32)
+  L2 = lattice[:, 1].astype(jnp.float32)
+
+  L1com = ellipticfunctions.to_cplx_divsqrt2(L1)
+  L2com = ellipticfunctions.to_cplx_divsqrt2(L2)
+  w1 = (L1com / 2.0).astype(jnp.complex64)
+  w2 = (L2com / 2.0).astype(jnp.complex64)
+  tau = (w2 / w1).astype(jnp.complex64)
+  pi_c = jnp.asarray(jnp.pi, jnp.float32).astype(jnp.complex64)
+
+  # Precompute θ₁ series coefficients once
+  theta_coeffs = ellipticfunctions._precompute_theta_coeffs(tau, max_terms=15)
+  t1p0, t1ppp0 = ellipticfunctions._theta_derivs0_from_coeffs(theta_coeffs)
+  c = - (pi_c * pi_c) / (24.0 * w1 * w1) * (t1ppp0 / t1p0)
+
+  # "almost" term, shared for both sectors
+  almost = ellipticfunctions.almost_modular(L1, L2, magfield_kwargs["N_phi"])
+
+  # consts for holo and anti sectors (differ only by N_phi)
+  consts_holo = {
+      'L1': L1,
+      'L2': L2,
+      'w1': w1,
+      'w2': w2,
+      'tau': tau,
+      'pi': pi_c,
+      'theta_coeffs': theta_coeffs,
+      't1p0': t1p0,
+      't1ppp0': t1ppp0,
+      'c': c,
+      'N_phi': jnp.asarray(N_holo, jnp.float32),
+      'almost': almost,
+  }
+  consts_anti = {
+      'L1': L1,
+      'L2': L2,
+      'w1': w1,
+      'w2': w2,
+      'tau': tau,
+      'pi': pi_c,
+      'theta_coeffs': theta_coeffs,
+      't1p0': t1p0,
+      't1ppp0': t1ppp0,
+      'c': c,
+      'N_phi': jnp.asarray(max(N_anti, 1), jnp.float32),  # avoid div-by-zero if N_anti==0
+      'almost': almost,
+  }
+
+  consts_holo = jax.tree.map(lambda x: jax.lax.stop_gradient(jnp.asarray(x)), consts_holo)
+  consts_anti = jax.tree.map(lambda x: jax.lax.stop_gradient(jnp.asarray(x)), consts_anti)
+
+  # ---------- init: identical to your version ----------
+  def init(
+      natom: int,
+      output_dims: Sequence[int],
+      ndim: int = 2,
+  ) -> Sequence[Mapping[str, jnp.ndarray]]:
+    del natom, ndim
+
+    params = []
+    key = jax.random.PRNGKey(1234)
+
+    for odim in output_dims:
+      key, subkey_h = jax.random.split(key)
+      key, subkey_a = jax.random.split(key)
+
+      # Holomorphic zeros: store as weight matrix (N_holo*2, odim)
+      if N_holo > 0:
+        uv_h = jax.random.uniform(subkey_h, (odim, N_holo, 2), dtype=jnp.float32)
+        zeros_h_init = (uv_h[..., 0:1] * L1[None, None, :] +
+                        uv_h[..., 1:2] * L2[None, None, :])  # (odim, N_holo, 2)
+        zeros_h_mean = jnp.mean(zeros_h_init, axis=1, keepdims=True)
+        zeros_h_centered = zeros_h_init - zeros_h_mean          # (odim, N_holo, 2)
+        zeros_h_weight = jnp.transpose(zeros_h_centered, (1, 2, 0))  # (N_holo, 2, odim)
+        zeros_h_weight = zeros_h_weight.reshape(N_holo * 2, odim)    # (N_holo*2, odim)
+      else:
+        zeros_h_weight = jnp.zeros((0, odim), dtype=jnp.float32)
+
+      # Anti-holomorphic zeros: also weight matrix (N_anti*2, odim)
+      if N_anti > 0:
+        uv_a = jax.random.uniform(subkey_a, (odim, N_anti, 2), dtype=jnp.float32)
+        zeros_a_init = (uv_a[..., 0:1] * L1[None, None, :] +
+                        uv_a[..., 1:2] * L2[None, None, :])  # (odim, N_anti, 2)
+        zeros_a_mean = jnp.mean(zeros_a_init, axis=1, keepdims=True)
+        zeros_a_centered = zeros_a_init - zeros_a_mean         # (odim, N_anti, 2)
+        zeros_a_weight = jnp.transpose(zeros_a_centered, (1, 2, 0))  # (N_anti, 2, odim)
+        zeros_a_weight = zeros_a_weight.reshape(N_anti * 2, odim)    # (N_anti*2, odim)
+      else:
+        zeros_a_weight = jnp.zeros((0, odim), dtype=jnp.float32)
+
+      params.append({
+          'gain': jnp.ones((odim,), dtype=jnp.float32),
+          'zeros_holo_unconstrained': zeros_h_weight.astype(jnp.float32),
+          'zeros_anti_unconstrained': zeros_a_weight.astype(jnp.float32),
+      })
+
+    return params
+
+  # ---------- apply: memory-efficient version ----------
+  def apply(
+      *,
+      ae: jnp.ndarray,
+      r_ae: jnp.ndarray,
+      r_ee: jnp.ndarray,
+      gain: jnp.ndarray,
+      zeros_holo_unconstrained: jnp.ndarray,
+      zeros_anti_unconstrained: jnp.ndarray,
+  ) -> jnp.ndarray:
+    """ae: (nelectron, natom, 2) -> returns (nelectron, output_dim)."""
+    del r_ae, r_ee
+
+    # positions (ne,2)
+    pos = ae[:, 0, :].astype(jnp.float32)
+    z = z_scale * (pos[..., 0] + 1j * pos[..., 1]) / jnp.sqrt(2.0)
+    z = z.astype(jnp.complex64)  # (ne,)
+    ne = z.shape[0]
+    odim = gain.shape[0]
+
+    # --- decode weight matrices back into zeros and center them ---
+
+    # holomorphic sector zeros: (odim, N_holo) complex
+    if N_holo > 0 and zeros_holo_unconstrained.size > 0:
+      assert zeros_holo_unconstrained.shape == (N_holo * 2, odim)
+      zh = zeros_holo_unconstrained.reshape(N_holo, 2, odim)     # (N_holo, 2, odim)
+      zh = jnp.transpose(zh, (2, 0, 1))                          # (odim, N_holo, 2)
+      mean_h = jnp.mean(zh, axis=1, keepdims=True)               # (odim, 1, 2)
+      zeros_h_centered = zh - mean_h                             # (odim, N_holo, 2)
+      zeros_h_c = (zeros_h_centered[..., 0] +
+                   1j * zeros_h_centered[..., 1]).astype(jnp.complex64)  # (odim, N_holo)
+    else:
+      zeros_h_c = jnp.zeros((odim, 0), dtype=jnp.complex64)
+
+    # anti-holomorphic sector zeros: (odim, N_anti) complex
+    if N_anti > 0 and zeros_anti_unconstrained.size > 0:
+      assert zeros_anti_unconstrained.shape == (N_anti * 2, odim)
+      za = zeros_anti_unconstrained.reshape(N_anti, 2, odim)     # (N_anti, 2, odim)
+      za = jnp.transpose(za, (2, 0, 1))                          # (odim, N_anti, 2)
+      mean_a = jnp.mean(za, axis=1, keepdims=True)               # (odim, 1, 2)
+      zeros_a_centered = za - mean_a                             # (odim, N_anti, 2)
+      zeros_a_c = (zeros_a_centered[..., 0] +
+                   1j * zeros_a_centered[..., 1]).astype(jnp.complex64)  # (odim, N_anti)
+    else:
+      zeros_a_c = jnp.zeros((odim, 0), dtype=jnp.complex64)
+
+    # --- per-electron log envelope: (odim,) ---
+
+    def log_env_one_electron(z_e: jnp.ndarray) -> jnp.ndarray:
+      """Return log envelope over orbitals for a single electron: shape (odim,)."""
+      # holomorphic part: vmap over orbitals (axis 0 of zeros_h_c)
+      if N_holo > 0 and zeros_h_c.shape[1] > 0:
+        def log_holo_for_orb(zeros_k):
+          return ellipticfunctions._LLL_with_zeros_log_cached(
+              z_e, zeros_k, consts_holo
+          )
+        log_holo = jax.vmap(log_holo_for_orb, in_axes=0)(zeros_h_c)  # (odim,)
+      else:
+        log_holo = jnp.zeros((odim,), dtype=jnp.complex64)
+
+      # anti-holomorphic part
+      if N_anti > 0 and zeros_a_c.shape[1] > 0:
+        def log_anti_for_orb(zeros_k):
+          val = ellipticfunctions._LLL_with_zeros_log_cached(
+              jnp.conj(z_e), zeros_k, consts_anti
+          )
+          return jnp.conj(val)
+        log_anti = jax.vmap(log_anti_for_orb, in_axes=0)(zeros_a_c)  # (odim,)
+      else:
+        log_anti = jnp.zeros((odim,), dtype=jnp.complex64)
+
+      return log_holo + log_anti  # (odim,)
+
+    # vmap over electrons: (ne,) -> (ne, odim)
+    log_env_eo = jax.vmap(log_env_one_electron, in_axes=0)(z)  # (ne, odim)
+
+    # --- KFAC dense tagging (unchanged, just add shifts to log_env_eo) ---
+    if use_kfac_dense:
+      # Holomorphic zeros
+      if N_holo > 0 and zeros_holo_unconstrained.size > 0:
+        in_dim_h = N_holo * 2
+        x_h = jnp.ones((ne, in_dim_h), dtype=jnp.float32)
+        W_h = zeros_holo_unconstrained
+        pre_h = x_h @ W_h  # (ne, odim)
+        pre_h = kfac_jax.register_dense(
+            pre_h,
+            x_h,
+            W_h,
+            variant="repeated_dense",
+            type="full",
+        )
+        shift_h = kfac_dense_eps * jnp.real(pre_h)
+        log_env_eo = log_env_eo + shift_h
+
+      # Anti-holomorphic zeros
+      if N_anti > 0 and zeros_anti_unconstrained.size > 0:
+        in_dim_a = N_anti * 2
+        x_a = jnp.ones((ne, in_dim_a), dtype=jnp.float32)
+        W_a = zeros_anti_unconstrained
+        pre_a = x_a @ W_a  # (ne, odim)
+        pre_a = kfac_jax.register_dense(
+            pre_a,
+            x_a,
+            W_a,
+            variant="repeated_dense",
+            type="full",
+        )
+        shift_a = kfac_dense_eps * jnp.real(pre_a)
+        log_env_eo = log_env_eo + shift_a
+
+    # --- exponentiate and apply gain ---
+    env_eo = jnp.exp(log_env_eo).astype(jnp.complex64)
+    gain_c = gain.astype(env_eo.dtype)
+    env_eo = env_eo * gain_c[None, :]
+
+    return env_eo
+
+  return envelopes.Envelope(envelopes.EnvelopeType.PRE_DETERMINANT, init, apply)
+
 def make_vortexformer_envelope(
     lattice: jnp.ndarray,
     elliptic_log_sigma=None,   # kept for API compatibility
