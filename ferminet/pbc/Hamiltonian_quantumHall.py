@@ -718,7 +718,7 @@ def local_energy(
     periodic_lattice: Optional[jnp.ndarray] = None,
     periodic_potential_kwargs = {},
     heg: bool = True,
-    convergence_radius: int = 20,
+    convergence_radius: int = 15,
     potential_type = 'Coulomb',
     potential_kwargs = {}
 ) -> hamiltonian.LocalEnergy:
@@ -825,6 +825,129 @@ def local_energy(
     #out = kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)
     
     return  potential + kinetic  + 1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)  , None
+  return _e_l
+
+def local_energy_nointeraction(
+    f: networks.FermiNetLike,
+    charges: jnp.ndarray,
+    nspins: Sequence[int],
+    use_scan: bool = False,
+    complex_output: bool = False,
+    states: int = 0,
+    lattice: Optional[jnp.ndarray] = None,
+    kinetic_energy_kwargs = {},
+    Bfield_lattice: Optional[jnp.ndarray] = None,
+    Bfield_kwargs = {},
+    periodic_lattice: Optional[jnp.ndarray] = None,
+    periodic_potential_kwargs = {},
+    heg: bool = True,
+    convergence_radius: int = 15,
+    potential_type = 'Coulomb',
+    potential_kwargs = {}
+) -> hamiltonian.LocalEnergy:
+  """Creates the local energy function in periodic boundary conditions.
+
+  Args:
+    f: Callable which returns the sign and log of the magnitude of the
+      wavefunction given the network parameters and configurations data.
+    charges: Shape (natoms). Nuclear charges of the atoms.
+    nspins: Number of particles of each spin.
+    use_scan: Whether to use a `lax.scan` for computing the laplacian.
+    complex_output: If true, the output of f is complex-valued.
+    states: Number of excited states to compute. Not implemented, only present
+      for consistency of calling convention.
+    lattice: Shape (ndim, ndim). Matrix of lattice vectors. Default: identity
+      matrix.
+    kinetic_energy_kwargs: kwargs for the kinetic energy function.
+    periodic_lattice: Shape (ndim, ndim). Matrix of lattice vectors of the unit cell of the periodic potential.
+    heg: bool. Flag to enable features specific to the electron gas.
+    convergence_radius: int. Radius of cluster summed over by Ewald sums.
+    potential_type: specifies the type of ee potential to use.
+    potential_kwargs: kwargs for the ee potential
+
+  Returns:
+    Callable with signature e_l(params, key, data) which evaluates the local
+    energy of the wavefunction given the parameters params, RNG state key,
+    and a single MCMC configuration in data.
+  """
+  print("Using customized local_energy from pbc.hamiltonian ")
+  if states:
+    raise NotImplementedError('Excited states not implemented with PBC.')
+  del nspins
+  assert lattice is not None, "pbc.hamiltonian.local_energy requires lattice to be passed"
+
+  ke = hamiltonian.local_kinetic_energy(f, use_scan=use_scan,
+                                        complex_output=complex_output,
+                                        laplacian_method=potential_kwargs['laplacian_method'])
+
+  if potential_type == "Coulomb":
+    # Coulomb e-e interaction potential. 
+    # Optionally, specify interaction_energy_scale as an overall factor.
+    # WARNING: Jastrow factors assume interaction_energy_scale = 1
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+
+    potential_energy = make_2DCoulomb_potential(
+        lattice, jnp.array([0.0]), charges, convergence_radius, interaction_energy_scale
+    )
+  elif potential_type == "Gaussian":
+     # Gaussian potential requires U, U_width to be specified in potential_kwargs
+    potential_energy = make_Gaussian_potential(
+        lattice, jnp.array([0.0]), charges, convergence_radius, potential_kwargs['U'], potential_kwargs['U_width']
+    )
+  elif potential_type == "LLL_MR_effective":
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+    potential_energy = make_MR_effective_potential(
+        lattice,
+        jnp.array([0.0]),
+        charges,
+        convergence_radius,
+        convergence_radius,
+        interaction_energy_scale)
+  elif potential_type == "softCoulomb":
+    if 'interaction_energy_scale' in potential_kwargs:
+      interaction_energy_scale = potential_kwargs['interaction_energy_scale']
+    else:
+      interaction_energy_scale = 1.0
+    potential_energy = make_softCoulomb_potential(
+        lattice,
+        jnp.array([0.0]),
+        charges,
+        convergence_radius,
+        convergence_radius,
+        interaction_energy_scale,
+        potential_kwargs['lambda_soft'])
+ # periodic_potential_energy = make_cosine_potential(periodic_lattice,periodic_potential_kwargs['coefficients'], periodic_potential_kwargs['phases'])
+  vector_potential = symmetric_gauge_vector_potential()
+  grad_func = local_gradient(f)
+  def _e_l(
+        params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData
+  ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+    """Returns the total energy.
+
+    Args:
+        params: network parameters.
+        key: RNG state.
+        data: MCMC configuration.
+    """
+    del key  # unused
+    ae, ee, _, _ = networks.construct_input_features(
+        data.positions, data.atoms, ndim=2)
+    #potential = potential_energy(ae, ee)
+   # periodic_potential = periodic_potential_energy(ae)
+    kinetic = ke(params, data)
+    gradf = grad_func(params,data)
+    _,Avec_val = vector_potential(ae)
+    #return potential + kinetic_energy_kwargs['prefactor']*jnp.real(kinetic) + periodic_potential, None
+    #+ + jnp.real(-1.0j* jnp.dot(Avec_val,gradf))  + 0.5*jnp.dot(Avec_val,Avec_val)
+    #out = kinetic  -1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)
+    
+    return  kinetic  + 1.0j* jnp.dot(Avec_val,gradf)  + 0.5*jnp.dot(Avec_val,Avec_val)  , None
   return _e_l
 
 def local_energy_enforce_real(

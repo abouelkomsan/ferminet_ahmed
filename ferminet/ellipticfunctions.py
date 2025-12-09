@@ -869,7 +869,7 @@ def _reduce_u_and_z(u, tau, w1):
 
 # ---------- precompute θ-coefficients for fixed τ ----------
 
-def _precompute_theta_coeffs(tau, max_terms=20):
+def _precompute_theta_coeffs(tau, max_terms=30):
   """Precompute θ₁ series coefficients and derivative coefficients for fixed τ."""
   tau = jnp.asarray(tau, jnp.complex64)
   q   = _xcispi(tau)

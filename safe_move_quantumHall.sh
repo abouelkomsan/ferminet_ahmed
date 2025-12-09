@@ -7,171 +7,152 @@ SRC_BASE="/work/submit/ahmed95"
 
 mkdir -p "$DST_BASE"
 
-# Raw list of directories (keep as-is here; we'll clean it below)
+# Raw list of DIRECTORIES (relative to $SRC_BASE)
 LIST_RAW=$(cat <<'EOF'
-torusquantumHall/ferminet_2025_11_13_08:50:12/
-torusquantumHall/ferminet_2025_11_13_12:04:43/
-torusquantumHall/ferminet_2025_11_13_12:16:14/ 
-torusquantumHall/ferminet_2025_11_13_12:20:18/ 
-torusquantumHall/ferminet_2025_11_13_12:38:51/ 
-torusquantumHall/ferminet_2025_11_13_12:42:15/ 
-torusquantumHall/ferminet_2025_11_13_14:36:15/ 
-torusquantumHall/ferminet_2025_11_13_16:00:05/ 
-torusquantumHall/ferminet_2025_11_13_16:01:32/ 
-torusquantumHall/ferminet_2025_11_13_16:04:47/ 
-torusquantumHall/ferminet_2025_11_13_16:21:05/ 
-torusquantumHall/ferminet_2025_11_13_16:40:57/ 
-torusquantumHall/ferminet_2025_11_13_16:57:48/ 
-torusquantumHall/ferminet_2025_11_13_17:32:00/ 
-torusquantumHall/ferminet_2025_11_13_19:44:13/ 
-torusquantumHall/ferminet_2025_11_13_21:01:39/ 
-torusquantumHall/ferminet_2025_11_13_21:31:54/ 
-torusquantumHall/ferminet_2025_11_13_21:45:02/ 
-torusquantumHall/ferminet_2025_11_13_22:01:58/ 
-torusquantumHall/ferminet_2025_11_13_22:05:28/ 
-torusquantumHall/ferminet_2025_11_13_23:11:48/ 
-torusquantumHall/ferminet_2025_11_13_23:15:50/ 
-torusquantumHall/ferminet_2025_11_13_23:35:32/ 
-torusquantumHall/ferminet_2025_11_14_09:14:47/ 
-torusquantumHall/ferminet_2025_11_14_09:17:50/
-torusquantumHall/ferminet_2025_11_14_09:30:18/ 
-torusquantumHall/ferminet_2025_11_14_09:30:20/ 
-torusquantumHall/ferminet_2025_11_14_09:30:25/ 
-torusquantumHall/ferminet_2025_11_14_09:45:44/
-torusquantumHall/ferminet_2025_11_14_09:46:29/ 
-torusquantumHall/ferminet_2025_11_14_10:05:43/
-torusquantumHall/ferminet_2025_11_14_10:05:51/ 
-torusquantumHall/ferminet_2025_11_14_10:19:23/ 
-torusquantumHall/ferminet_2025_11_14_10:32:19/ 
-torusquantumHall/ferminet_2025_11_14_10:34:58/ 
-torusquantumHall/ferminet_2025_11_14_11:55:28/ 
-torusquantumHall/ferminet_2025_11_14_14:20:02/ 
-torusquantumHall/ferminet_2025_11_14_15:16:00/ 
-torusquantumHall/ferminet_2025_11_14_15:31:53/ 
-torusquantumHall/ferminet_2025_11_14_15:59:21/ 
-torusquantumHall/ferminet_2025_11_14_16:03:02/
-torusquantumHall/ferminet_2025_11_14_16:55:29/ 
-torusquantumHall/ferminet_2025_11_14_17:13:31/ 
-torusquantumHall/ferminet_2025_11_14_17:59:24/ 
-torusquantumHall/ferminet_2025_11_14_18:27:25/ 
-torusquantumHall/ferminet_2025_11_14_20:39:25/ 
-torusquantumHall/ferminet_2025_11_14_21:33:16/ 
-torusquantumHall/ferminet_2025_11_14_22:58:18/ 
-torusquantumHall/ferminet_2025_11_14_23:04:41/ 
-torusquantumHall/ferminet_2025_11_14_23:48:22/ 
-torusquantumHall/ferminet_2025_11_15_01:39:34/ 
-torusquantumHall/ferminet_2025_11_15_16:32:22/ 
-torusquantumHall/ferminet_2025_11_15_18:46:07/ 
-torusquantumHall/ferminet_2025_11_15_18:52:46/ 
-torusquantumHall/ferminet_2025_11_15_19:41:28/ 
-torusquantumHall/ferminet_2025_11_15_21:04:23/ 
-torusquantumHall/ferminet_2025_11_15_21:04:40/ 
-torusquantumHall/ferminet_2025_11_15_21:04:52/ 
-torusquantumHall/ferminet_2025_11_15_21:20:11/ 
-torusquantumHall/ferminet_2025_11_15_21:32:52/ 
-torusquantumHall/ferminet_2025_11_15_23:42:46/ 
-torusquantumHall/ferminet_2025_11_16_09:56:25/ 
-torusquantumHall/ferminet_2025_11_16_11:01:47/ 
-torusquantumHall/ferminet_2025_11_16_11:11:00/ 
-torusquantumHall/ferminet_2025_11_16_12:19:46/ 
-torusquantumHall/ferminet_2025_11_16_12:33:20/ 
-torusquantumHall/ferminet_2025_11_16_18:15:46/ 
-torusquantumHall/ferminet_2025_11_16_18:19:43/ 
-torusquantumHall/ferminet_2025_11_17_08:22:26/ 
-torusquantumHall/ferminet_2025_11_17_08:24:10/ 
-torusquantumHall/ferminet_2025_11_17_09:56:21/ 
-torusquantumHall/ferminet_2025_11_17_12:09:36/ 
-torusquantumHall/ferminet_2025_11_17_13:49:10/ 
-torusquantumHall/ferminet_2025_11_17_15:25:59/ 
-torusquantumHall/ferminet_2025_11_17_15:57:22/ 
-torusquantumHall/ferminet_2025_11_17_18:54:42/ 
-torusquantumHall/ferminet_2025_11_17_19:05:23/ 
-torusquantumHall/ferminet_2025_11_17_19:27:23/ 
-torusquantumHall/ferminet_2025_11_17_19:38:06/ 
-torusquantumHall/ferminet_2025_11_17_19:48:07/ 
-torusquantumHall/ferminet_2025_11_17_20:01:09/ 
-torusquantumHall/ferminet_2025_11_17_20:50:51/ 
-torusquantumHall/ferminet_2025_11_17_23:30:26/ 
-torusquantumHall/ferminet_2025_11_17_23:34:45/
-torusquantumHall/ferminet_2025_11_17_23:48:07/ 
-torusquantumHall/ferminet_2025_11_17_23:52:55/ 
-torusquantumHall/ferminet_2025_11_18_00:08:32/ 
-torusquantumHall/ferminet_2025_11_18_00:12:26/ 
-torusquantumHall/ferminet_2025_11_18_00:45:16/ 
-torusquantumHall/ferminet_2025_11_18_01:32:44/ 
-torusquantumHall/ferminet_2025_11_18_01:46:29/ 
-torusquantumHall/ferminet_2025_11_18_01:48:15/ 
-torusquantumHall/ferminet_2025_11_18_09:27:58/ 
-torusquantumHall/ferminet_2025_11_18_09:41:24/ 
-torusquantumHall/ferminet_2025_11_18_10:45:59/ 
-torusquantumHall/ferminet_2025_11_18_11:06:46/ 
-torusquantumHall/ferminet_2025_11_18_13:05:39/ 
-torusquantumHall/ferminet_2025_11_18_14:17:59/ 
-torusquantumHall/ferminet_2025_11_18_15:02:21/ 
-torusquantumHall/ferminet_2025_11_18_15:03:11/ 
-torusquantumHall/ferminet_2025_11_18_15:16:15/ 
-torusquantumHall/ferminet_2025_11_18_15:19:55/ 
-torusquantumHall/ferminet_2025_11_18_15:32:53/ 
-torusquantumHall/ferminet_2025_11_18_15:37:16/ 
-torusquantumHall/ferminet_2025_11_18_15:39:29/ 
-torusquantumHall/ferminet_2025_11_18_15:57:09/ 
-torusquantumHall/ferminet_2025_11_18_16:16:15/ 
-torusquantumHall/ferminet_2025_11_18_16:28:28/ 
-torusquantumHall/ferminet_2025_11_18_16:31:56/ 
-torusquantumHall/ferminet_2025_11_18_17:19:55/ 
-torusquantumHall/ferminet_2025_11_18_17:20:08/ 
-torusquantumHall/ferminet_2025_11_18_17:40:08/ 
-torusquantumHall/ferminet_2025_11_18_18:22:05/ 
-torusquantumHall/ferminet_2025_11_18_23:06:20/ 
-torusquantumHall/ferminet_2025_11_18_23:08:04/ 
-torusquantumHall/ferminet_2025_11_18_23:20:14/ 
-torusquantumHall/ferminet_2025_11_18_23:34:05/ 
-torusquantumHall/ferminet_2025_11_18_23:48:25/
+torusquantumHall/ferminet_2025_11_22_11:50:35
+torusquantumHall/ferminet_2025_11_22_12:16:31
+torusquantumHall/ferminet_2025_11_22_15:26:20
+torusquantumHall/ferminet_2025_11_22_17:10:06
+torusquantumHall/ferminet_2025_11_22_18:20:02
+torusquantumHall/ferminet_2025_11_22_22:16:55
+torusquantumHall/ferminet_2025_11_22_22:19:59
+torusquantumHall/ferminet_2025_11_22_22:34:18
+torusquantumHall/ferminet_2025_11_22_23:17:08
+torusquantumHall/ferminet_2025_11_22_23:37:35
+torusquantumHall/ferminet_2025_11_22_23:46:51
+torusquantumHall/ferminet_2025_11_23_10:55:03
+torusquantumHall/ferminet_2025_11_23_11:01:13
+torusquantumHall/ferminet_2025_11_23_11:43:37
+torusquantumHall/ferminet_2025_11_23_11:59:46
+torusquantumHall/ferminet_2025_11_23_12:09:08
+torusquantumHall/ferminet_2025_11_23_12:13:20
+torusquantumHall/ferminet_2025_11_23_12:16:55
+torusquantumHall/ferminet_2025_11_23_12:39:14
+torusquantumHall/ferminet_2025_11_23_14:15:18
+torusquantumHall/ferminet_2025_11_23_14:27:20
+torusquantumHall/ferminet_2025_11_23_14:50:22
+torusquantumHall/ferminet_2025_11_23_16:22:26
+torusquantumHall/ferminet_2025_11_23_16:35:25
+torusquantumHall/ferminet_2025_11_23_18:15:17
+torusquantumHall/ferminet_2025_11_23_18:16:04
+torusquantumHall/ferminet_2025_11_23_18:22:05
+torusquantumHall/ferminet_2025_11_23_23:52:16
+torusquantumHall/ferminet_2025_11_23_23:57:06
+torusquantumHall/ferminet_2025_11_24_00:11:26
+torusquantumHall/ferminet_2025_11_24_09:22:08
+torusquantumHall/ferminet_2025_11_24_12:05:40
+torusquantumHall/ferminet_2025_11_24_13:25:37
+torusquantumHall/ferminet_2025_11_24_16:00:09
+torusquantumHall/ferminet_2025_11_24_16:19:11
+torusquantumHall/ferminet_2025_11_24_18:39:07
+torusquantumHall/ferminet_2025_11_24_18:40:01
+torusquantumHall/ferminet_2025_11_24_18:50:42
+torusquantumHall/ferminet_2025_11_24_19:25:07
+torusquantumHall/ferminet_2025_11_24_22:48:52
+torusquantumHall/ferminet_2025_11_25_00:21:31
+torusquantumHall/ferminet_2025_11_25_00:31:45
+torusquantumHall/ferminet_2025_11_25_00:34:16
+torusquantumHall/ferminet_2025_11_25_09:28:01
+torusquantumHall/ferminet_2025_11_25_10:42:16
+torusquantumHall/ferminet_2025_11_25_12:13:12
+torusquantumHall/ferminet_2025_11_25_15:37:24
+torusquantumHall/ferminet_2025_11_25_23:06:08
+torusquantumHall/ferminet_2025_11_25_23:30:49
+torusquantumHall/ferminet_2025_11_25_23:54:55
+torusquantumHall/ferminet_2025_11_26_09:37:50
+torusquantumHall/ferminet_2025_11_26_09:50:35
+torusquantumHall/ferminet_2025_11_26_11:21:57
+torusquantumHall/ferminet_2025_11_26_18:44:40
+torusquantumHall/ferminet_2025_11_26_19:08:19
+torusquantumHall/ferminet_2025_11_26_19:58:54
+torusquantumHall/ferminet_2025_11_26_20:51:31
+torusquantumHall/ferminet_2025_11_26_21:13:10
+torusquantumHall/ferminet_2025_11_27_10:19:53
+torusquantumHall/ferminet_2025_11_27_10:41:17
+torusquantumHall/ferminet_2025_11_27_10:41:27
+torusquantumHall/ferminet_2025_11_28_06:07:20
+torusquantumHall/ferminet_2025_11_28_10:12:36
+torusquantumHall/ferminet_2025_11_29_10:28:51
+torusquantumHall/ferminet_2025_11_29_10:47:32
+torusquantumHall/ferminet_2025_11_29_10:47:35
+torusquantumHall/ferminet_2025_11_29_12:07:48
+torusquantumHall/ferminet_2025_11_29_12:08:31
+torusquantumHall/ferminet_2025_11_29_17:52:22
+torusquantumHall/ferminet_2025_12_01_08:43:33
+torusquantumHall/ferminet_2025_12_01_12:57:06
+torusquantumHall/ferminet_2025_12_01_14:26:26
+torusquantumHall/ferminet_2025_12_02_10:33:35
+torusquantumHall/ferminet_2025_12_02_10:38:22
+torusquantumHall/ferminet_2025_12_02_12:33:26
+torusquantumHall/ferminet_2025_12_02_12:56:00
+torusquantumHall/ferminet_2025_12_02_12:56:17
+torusquantumHall/ferminet_2025_12_02_12:56:35
+torusquantumHall/ferminet_2025_12_02_13:16:09
+torusquantumHall/ferminet_2025_12_02_13:36:52
+torusquantumHall/ferminet_2025_12_02_15:23:17
+torusquantumHall/ferminet_2025_12_02_15:25:48
+torusquantumHall/ferminet_2025_12_02_15:39:02
+torusquantumHall/ferminet_2025_12_02_16:09:10
+torusquantumHall/ferminet_2025_12_02_16:43:29
+torusquantumHall/ferminet_2025_12_02_17:11:53
+torusquantumHall/ferminet_2025_12_02_17:58:10
+torusquantumHall/ferminet_2025_12_03_12:57:32
+torusquantumHall/ferminet_2025_12_03_13:40:23
+torusquantumHall/ferminet_2025_12_03_14:20:25
+torusquantumHall/ferminet_2025_12_03_14:33:14
+torusquantumHall/ferminet_2025_12_03_14:38:12
+torusquantumHall/ferminet_2025_12_03_16:00:15
+torusquantumHall/ferminet_2025_12_03_16:28:59
+torusquantumHall/ferminet_2025_12_03_16:48:12
 EOF
 )
 
-# Clean up the list:
-# - trim leading/trailing whitespace on each line
-# - drop completely empty lines
+# Clean up: trim whitespace, remove empty lines
 LIST_CLEAN=$(printf '%s\n' "$LIST_RAW" \
   | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
   | sed '/^$/d')
 
 cd "$SRC_BASE"
 
-# Convenience: create one process substitution command for all rsync uses
-FILES_FROM_CLEAN="<(printf '%s\n' \"$LIST_CLEAN\")"
+echo "Source base:      $SRC_BASE"
+echo "Destination base: $DST_BASE"
+echo "Directories to move (contents):"
+printf '%s\n' "$LIST_CLEAN"
+echo "========================================"
 
-echo "== Dry-run =="
-# shellcheck disable=SC2086
-rsync -aHAXnv -s --info=stats1,progress2 \
-  --files-from=<(printf '%s\n' "$LIST_CLEAN") \
-  ./ "$DST_BASE/"
-
-echo "== Copying =="
-# shellcheck disable=SC2086
-rsync -aHAX -s --info=stats1,progress2 \
-  --files-from=<(printf '%s\n' "$LIST_CLEAN") \
-  ./ "$DST_BASE/"
-
-echo "== Verifying by checksum (should print nothing) =="
-# shellcheck disable=SC2086
-rsync -aHAXcni -s --delete \
-  --files-from=<(printf '%s\n' "$LIST_CLEAN") \
-  ./ "$DST_BASE/"
-
-echo "== Removing originals safely (only files already copied) =="
-# shellcheck disable=SC2086
-rsync -aHAX -s --remove-source-files \
-  --files-from=<(printf '%s\n' "$LIST_CLEAN") \
-  ./ "$DST_BASE/"
-
-echo "== Cleaning up now-empty source directories =="
-printf '%s\n' "$LIST_CLEAN" | while IFS= read -r d; do
-  # Only try to delete if directory actually exists
+# Optional: quick existence check
+echo "== Existence check =="
+while IFS= read -r d; do
   if [ -d "$d" ]; then
-    find "$d" -depth -type d -empty -delete || true
+    echo "OK dir:  $SRC_BASE/$d"
+  else
+    echo "MISSING dir: $SRC_BASE/$d"
   fi
-done
+done <<< "$LIST_CLEAN"
+echo "========================================"
 
-echo "Done. Moved into: $DST_BASE"
+# Move contents of each directory
+while IFS= read -r d; do
+  if [ ! -d "$d" ]; then
+    echo "Skipping missing directory: $SRC_BASE/$d"
+    continue
+  fi
+
+  src_dir="$d"
+  dst_dir="$DST_BASE/$d"
+
+  echo
+  echo "=== Moving contents of: $SRC_BASE/$src_dir -> $dst_dir ==="
+  mkdir -p "$dst_dir"
+
+  # Trailing slash on source means "contents of this directory"
+  rsync -aHAXv -s --remove-source-files \
+    "$src_dir"/ "$dst_dir"/
+
+  echo "Cleaning up empty directories under: $SRC_BASE/$src_dir"
+  find "$src_dir" -depth -type d -empty -print -delete || true
+done <<< "$LIST_CLEAN"
+
+echo
+echo "Done. All files within those directories should now be under:"
+echo "  $DST_BASE"

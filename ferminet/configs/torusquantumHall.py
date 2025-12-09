@@ -265,7 +265,7 @@ def get_config():
   #cfg.initialization.modifications = ['orbital-rnd']
   cfg.initialization.flatten_num_devices = False
   cfg.initialization.ignore_batch = False
-  cfg.initialization.randomize = True
+  cfg.initialization.randomize = False
   cfg.targetmom.mom = None
   #key = jax.random.PRNGKey(64)
   #complex_zeros = init_random_zeros(9, lattice[:,0], lattice[:,1], key)

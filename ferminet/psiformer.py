@@ -589,6 +589,1111 @@ def make_fermi_net_with_zero_projection(
       orbitals=orbitals_apply,
   )
 
+def make_fermi_net_with_zero_projection_momind_0(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = False,
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    # Psiformer-specific kwargs:
+    num_layers: int,
+    num_heads: int,
+    heads_dim: int,
+    mlp_hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
+    # vortexformer-specific:
+    N_holo: int,
+    # magnetic Bloch / momentum:
+    momind: int,
+    mom_kwargs: dict,
+) -> networks.Network:
+  """Vortexformer (Psiformer + NN-projected zeros) with magnetic-momentum
+  projection using the many-body magnetic translation
+
+    Single-particle:  T(R) f(r) = η_R exp(i r×R / 2) f(r+R),  ℓ_B = 1
+    Many-body COM:    T_MB(R) Ψ({r_i}) = (η_R)^{N_e} exp(i/2 Σ_i r_i×R) Ψ({r_i+R})
+
+  with η_R = (-1)^{m+n+mn} for R = m a1 + n a2 (one-flux magnetic cell),
+  and magnetic Bloch state
+
+    Ψ_k({r_i}) = Σ_R e^{-i k·R} T_MB(R) Ψ({r_i}),
+
+  where R runs over magnetic unit-cell translations inside the supercell
+  (COM translations).
+  """
+
+  if envelope is None:
+    raise ValueError(
+        "make_fermi_net_with_zero_projection_momind expects an explicit "
+        "PRE_DETERMINANT envelope."
+    )
+
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection_momind must "
+        "be PRE_DETERMINANT."
+    )
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    if jastrow.upper() == 'DEFAULT':
+      jastrow = jastrows.JastrowType.SIMPLE_EE
+    else:
+      jastrow = jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )  # pytype: disable=wrong-keyword-args
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  orbitals_init, orbitals_apply = networks.make_orbitals_with_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic lattice / momentum data (via targetmom.*)
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs['abs_lattice']              # 2x2 Tmatrix of supercell
+  unit_cell_vectors = mom_kwargs['unit_cell_vectors']  # (2,2): a1,a2 magnetic cell
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+
+  # Reciprocal of supercell, T_i·G_j = 2π δ_ij
+  reciprocal = targetmom.reciprocal_vecs(
+      unit_cell_vectors[0],
+      unit_cell_vectors[1],
+      abs_lattice,
+  )  # shape (2,2), columns G1,G2
+
+  # g1,g2 following targetmom.g1g2 convention
+  g1, g2, _, _, _ = targetmom.g1g2(
+      abs_lattice, reciprocal[:, 0], reciprocal[:, 1]
+  )
+
+  # Integer k-labels in k-space (2D integer lattice inside MBZ)
+  klabels = targetmom.kpoints(abs_lattice)   # (N_k, 2)
+  klabel = klabels[momind]                   # chosen (m,n)
+
+  # Physical k-vector: k = m g1 + n g2 (targetmom.mn)
+  kvec = targetmom.mn(klabel, g1, g2)        # shape (2,)
+  # Magnetic cell vectors a1,a2 (1 flux quantum per cell); not used explicitly
+  a1 = unit_cell_vectors[0]                 # (2,)
+  a2 = unit_cell_vectors[1]                 # (2,)
+
+  # All translations R inside the supercell and their integer (m,n)
+  translations, xy_pairs = targetmom.find_all_translations_in_supercell(
+      lattice, unit_cell_vectors
+  )  # translations: (N_T,2), xy_pairs: (N_T,2) with integers (m,n)
+
+  num_translations = translations.shape[0]
+  m_int = xy_pairs[:, 0].astype(jnp.int32)
+  n_int = xy_pairs[:, 1].astype(jnp.int32)
+
+  # Number of electrons
+  Ne = sum(nspins)
+
+  # Single-particle η_R phase: η_R = (-1)^{m+n+mn} = exp[i π (m + n + m n)]
+  pi_eta_single = jnp.pi * (m_int + n_int + m_int * n_int).astype(jnp.float32)  # (N_T,)
+
+  # Many-body COM translation → (η_R)^{Ne} = exp[i π Ne (m + n + m n)]
+  pi_eta = Ne * pi_eta_single  # (N_T,)
+
+  # ---------------------------------------------------------------------------
+  # Helper: phases for T_MB(R) and Bloch factor e^{-i k·R}
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[R] for all translations R, given electron positions pos_xy.
+
+    Many-body COM translation:
+      T_MB(R) Ψ({r_i}) = (η_R)^{Ne} exp(i/2 Σ_i r_i×R) Ψ({r_i+R})
+
+    Bloch weight:
+      e^{-i k·R}
+
+    Total phase exponent (in the 'i * ...' of exp) is:
+
+      phase(R; {r_i}) = -k·R + (1/2) Σ_i (r_i×R) + π Ne (m + n + m n).
+    """
+    # r: (1,Ne,2), R: (N_T,1,2)
+    r = pos_xy[None, :, :]           # (1,Ne,2)
+    R = translations[:, None, :]     # (N_T,1,2)
+
+    # r_i × R = r_x R_y - r_y R_x
+    cross = r[..., 0] * R[..., 1] - r[..., 1] * R[..., 0]   # (N_T,Ne)
+
+    # Σ_i r_i×R
+    sum_cross = jnp.sum(cross, axis=1)                      # (N_T,)
+
+    # (1/2) Σ_i r_i×R
+    mag_phase = 0.5 * sum_cross                             # (N_T,)
+
+    # Bloch factor: -k·R
+    bloch_phase = -jnp.dot(translations, kvec)              # (N_T,)
+
+    # many-body η_R phase
+    eta_phase = pi_eta                                      # (N_T,)
+
+    total_phase = bloch_phase + mag_phase + eta_phase       # (N_T,)
+    return total_phase
+
+  # ---------------------------------------------------------------------------
+  # Apply: magnetic Bloch vortexformer
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the magnetic-momentum-projected vortexformer Ψ_k at positions `pos`."""
+
+    assert options.states == 0, "Momentum-projected version currently assumes states=0."
+
+    full_ndim = options.ndim
+
+    # Interpret pos in the same way orbitals_apply expects.
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)   # (Ne, ndim)
+      original_shape = 'flat'
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos                          # (Ne, ndim)
+      original_shape = 'matrix'
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    # xy coordinates (where magnetic structure lives)
+    pos_xy = pos_full[:, :2]                  # (Ne,2)
+
+    # Total phases per translation for this configuration:
+    #   -k·R  + (1/2 Σ_i r_i×R) + π Ne (m+n+mn)
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (N_T,)
+
+    # For each translation R, build COM-shifted coordinates:
+    #   r_i → r_i + R
+    total_shifts_xy = translations #+ shift_k[None, :]                                  # (N_T,2)
+
+    def translated_config(i):
+      base = pos_full                       # (Ne, full_ndim)
+      shift_xy = total_shifts_xy[i]         # (2,)
+      new_xy = pos_xy + shift_xy[None, :]   # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]               # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (N_T,Ne,full_ndim)
+
+    def eval_translation(i):
+      if original_shape == 'flat':
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+
+      # Multiply by our T_MB(R) and Bloch phase:
+      # total complex factor ~ exp(i * (phase_i + phases_per_translation[i]))
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each shape (N_T,)
+
+    # Complex log-sum-exp over translations
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(
+        logdets_i - max_logdet + 1j * phases_i
+    )
+    total_determinant = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total_determinant))
+    overall_phase = jnp.angle(total_determinant)
+
+    if 'state_scale' in params:
+      overall_log = overall_log + params['state_scale']
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
+def make_fermi_net_with_zero_projection_momind(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = False,
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    # Psiformer-specific kwargs:
+    num_layers: int,
+    num_heads: int,
+    heads_dim: int,
+    mlp_hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
+    # vortexformer-specific:
+    N_holo: int,
+    # magnetic Bloch / momentum:
+    momind: int,
+    mom_kwargs: dict,
+) -> networks.Network:
+  """Vortexformer (Psiformer + NN-projected zeros) projected to a magnetic
+  Bloch state using
+
+    Ψ_k({r_i}) = Σ_a exp{
+        i [ Σ_i ( k·(r_i - a)/2 + (z·(r_i×a))/(2ℓ_B^2) ) + π r s ]
+      } Ψ({r_i + a + ℓ_B^2 z×k}),
+
+  where a = r a1 + s a2 runs over magnetic unit-cell translations inside the
+  supercell, and all translations are center-of-mass (COM) translations.
+  """
+
+  if envelope is None:
+    raise ValueError(
+        "make_fermi_net_with_zero_projection_magnetic_bloch expects an explicit "
+        "PRE_DETERMINANT envelope."
+    )
+
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection_magnetic_bloch must "
+        "be PRE_DETERMINANT."
+    )
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    if jastrow.upper() == 'DEFAULT':
+      jastrow = jastrows.JastrowType.SIMPLE_EE
+    else:
+      jastrow = jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )  # pytype: disable=wrong-keyword-args
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  orbitals_init, orbitals_apply = networks.make_orbitals_with_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic lattice / momentum data (now all via targetmom.*)
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs['abs_lattice']              # 2x2 Tmatrix of supercell
+  unit_cell_vectors = mom_kwargs['unit_cell_vectors']  # (2,2): a1,a2 magnetic cell
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+
+  # Reciprocal of supercell, T_i·G_j = 2π δ_ij
+  reciprocal = targetmom.reciprocal_vecs(
+      unit_cell_vectors[0],
+      unit_cell_vectors[1],
+      abs_lattice,
+  )  # shape (2,2), columns G1,G2
+
+  # g1,g2 following your targetmom.g1g2 convention
+  g1, g2, _, _, _ = targetmom.g1g2(
+      abs_lattice, reciprocal[:, 0], reciprocal[:, 1]
+  )
+
+  # Integer k-labels in k-space (2D integer lattice inside MBZ)
+  klabels = targetmom.kpoints(abs_lattice)   # (N_k, 2)
+  klabel = klabels[momind]                  # chosen (m,n)
+
+  # Physical k-vector: k = m g1 + n g2 (your targetmom.mn)
+  kvec = targetmom.mn(klabel, g1, g2)       # shape (2,)
+
+  # Magnetic cell vectors a1,a2 (1 flux quantum per cell)
+  a1 = unit_cell_vectors[0]                 # (2,)
+  a2 = unit_cell_vectors[1]                 # (2,)
+
+  # Magnetic length ℓ_B from |a1×a2| = 2π ℓ_B^2
+  area = jnp.abs(a1[0] * a2[1] - a1[1] * a2[0])
+  ellB2 = area / (2.0 * jnp.pi)
+
+  # Guiding-center shift ℓ_B^2 z×k = ℓ_B^2 (-k_y, k_x)
+  shift_k = (ellB2 * jnp.array([-kvec[1], kvec[0]], dtype=kvec.dtype))  # (2,)
+
+  # All translations a inside the supercell and their integer (r,s)
+  translations, xy_pairs = targetmom.find_all_translations_in_supercell(
+      lattice, unit_cell_vectors
+  )  # translations: (N_T,2), xy_pairs: (N_T,2) with integers (r,s)
+
+  num_translations = translations.shape[0]
+  r_int = xy_pairs[:, 0].astype(jnp.int32)
+  s_int = xy_pairs[:, 1].astype(jnp.int32)
+
+  # π r s factor
+  pi_rs = jnp.pi * (r_int * s_int).astype(jnp.float32)  # (N_T,)
+
+  # ---------------------------------------------------------------------------
+  # Helper: phase Σ_i [ k·(r_i - a)/2 + (z·(r_i×a))/(2ℓ_B^2) ] + π r s
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[a] for all translations a, given electron positions pos_xy.
+
+    phases[a] = Σ_i [ k·(r_i - a)/2 + (z·(r_i×a))/(2ℓ_B^2) ] + π r s.
+    pos_xy: (Ne,2)
+    """
+    # r: (1,Ne,2), a: (N_T,1,2)
+    r = pos_xy[None, :, :]           # (1,Ne,2)
+    a = translations[:, None, :]     # (N_T,1,2)
+  
+    # r_i - a
+    r_minus_a = (r -  a)/pos_xy.shape[0]                # (N_T,Ne,2)
+    #r_minus_a =  - a  
+    print(pos_xy.shape[0])
+    # k·(r_i - a) for each i and each a
+    dot_term = jnp.sum(r_minus_a * kvec[None, None, :], axis=-1)  # (N_T,Ne)
+
+    # z·(r_i×a) = r_x a_y - r_y a_x
+    cross = r[..., 0] * a[..., 1] - r[..., 1] * a[..., 0]         # (N_T,Ne)
+
+    # per-electron contribution: [k·(r_i - a) + (cross/ℓ_B^2)] / 2
+    per_e_phase = 0.5*(dot_term + cross)               # (N_T,Ne)
+
+    # sum over electrons
+    sum_over_e = jnp.sum(per_e_phase, axis=1)                    # (N_T,)
+
+    # add π r s
+    total_phase = sum_over_e + pos_xy.shape[0]*pi_rs                             # (N_T,)
+    return total_phase
+
+  # ---------------------------------------------------------------------------
+  # Apply: magnetic Bloch vortexformer
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the magnetic Bloch-projected vortexformer Ψ_k at positions `pos`."""
+
+    assert options.states == 0, "Bloch-projected version currently assumes states=0."
+
+    Ne = sum(nspins)
+    full_ndim = options.ndim
+
+    # Interpret pos in the same way orbitals_apply expects.
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)   # (Ne, ndim)
+      original_shape = 'flat'
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos                          # (Ne, ndim)
+      original_shape = 'matrix'
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    # xy coordinates (where magnetic structure lives)
+    pos_xy = pos_full[:, :2]                  # (Ne,2)
+
+    # Phases per translation for this configuration (φ_nk formula)
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (N_T,)
+
+    # For each translation a, build COM-shifted coordinates:
+    # r_i → r_i + a + ℓ_B^2 z×k
+    total_shifts_xy = translations + (shift_k[None, :])/pos_xy.shape[0]                # (N_T,2)
+
+    def translated_config(i):
+      base = pos_full                   # (Ne, full_ndim)
+      shift_xy = total_shifts_xy[i]     # (2,)
+      new_xy = pos_xy + shift_xy[None, :]  # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]           # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (N_T,Ne,full_ndim)
+
+    def eval_translation(i):
+      if original_shape == 'flat':
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+
+      # Add Bloch phase from your φ_nk formula
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each shape (N_T,)
+
+    # Complex log-sum-exp over translations
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(
+        logdets_i - max_logdet + 1j * phases_i
+    )
+    total_determinant = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total_determinant))
+    overall_phase = jnp.angle(total_determinant)
+
+    if 'state_scale' in params:
+      overall_log = overall_log + params['state_scale']
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
+
+def make_fermi_net_with_zero_projection_COM_Kx(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = False,
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    # Psiformer-specific kwargs:
+    num_layers: int,
+    num_heads: int,
+    heads_dim: int,
+    mlp_hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
+    # vortexformer-specific:
+    N_holo: int,
+    # COM momentum K_y:
+    momind: int,
+    mom_kwargs: dict,
+) -> networks.Network:
+  """Vortexformer (Psiformer + NN-projected zeros) projected to a COM K_y sector.
+
+  Projects an arbitrary symmetric-gauge torus wavefunction onto a center-of-mass
+  momentum eigenstate along the L2 direction:
+
+    Ψ_{K_y}({r_i}) = (1/N_φ) Σ_{m=0}^{N_φ-1}
+       exp{ i [ (a_m × Σ_i r_i)/(2ℓ_B^2) - 2π K_y m / N_φ ] }
+       Ψ({r_i + a_m}),
+
+  with a_m = m L2 / N_φ and L2 the second supercell lattice vector.
+
+  Here N_φ is the number of flux quanta in the supercell, deduced from
+    |T1 × T2| / |a1 × a2|, with a1,a2 the magnetic cell vectors (1 flux each).
+  """
+
+  if envelope is None:
+    raise ValueError(
+        "make_fermi_net_with_zero_projection_COM_Ky expects an explicit "
+        "PRE_DETERMINANT envelope."
+    )
+
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection_COM_Ky must "
+        "be PRE_DETERMINANT."
+    )
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    if jastrow.upper() == 'DEFAULT':
+      jastrow = jastrows.JastrowType.SIMPLE_EE
+    else:
+      jastrow = jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )  # pytype: disable=wrong-keyword-args
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  orbitals_init, orbitals_apply = networks.make_orbitals_with_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic geometry and COM translation data
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs['abs_lattice']              # 2x2 supercell T-matrix
+  unit_cell_vectors = mom_kwargs['unit_cell_vectors']  # (2,2): magnetic a1,a2
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+  T1 = lattice[:, 0]
+  T2 = lattice[:, 1]
+
+  # Magnetic cell vectors a1,a2 (1 flux quantum per cell)
+  a1 = unit_cell_vectors[0]  # (2,)
+  a2 = unit_cell_vectors[1]  # (2,)
+
+  # Areas
+  area_cell = jnp.abs(a1[0] * a2[1] - a1[1] * a2[0])   # |a1 x a2|
+  area_super = jnp.abs(T1[0] * T2[1] - T1[1] * T2[0])  # |T1 x T2|
+
+  # Magnetic length ℓ_B^2 from |a1×a2| = 2π ℓ_B^2
+  ellB2 = area_cell / (2.0 * jnp.pi)  # scalar
+
+  # Number of flux quanta N_φ = area_super / area_cell
+  # (do this as Python ints to keep it static for JIT)
+  area_cell_f = float(area_cell)
+  area_super_f = float(area_super)
+  Nphi = int(round(area_super_f / area_cell_f))
+  if Nphi <= 0:
+    raise ValueError(f"Invalid Nphi={Nphi} from areas: cell={area_cell_f}, super={area_super_f}")
+
+  Ky = int(momind)
+  if not (0 <= Ky < Nphi):
+    raise ValueError(
+        f"K_y index momind={momind} out of range for Nphi={Nphi}."
+    )
+
+  # Fundamental COM translation step along L2 direction: b = L2 / Nphi
+  L2 = T1  # (2,)
+  step = L2 / float(Nphi)  # (2,)
+
+  # Precompute all translation vectors a_m = m * step, m=0..Nphi-1
+  m_vals = jnp.arange(Nphi, dtype=jnp.float32)  # (Nphi,)
+  translations = m_vals[:, None] * step[None, :]  # (Nphi,2)
+
+  # Static K_y phase factor: -2π K_y m / Nphi
+  ky_phases = (-2.0 * jnp.pi * Ky * m_vals / float(Nphi)) + (jnp.pi * m_vals)  # (Nphi,)
+
+  num_translations = translations.shape[0]
+
+  # ---------------------------------------------------------------------------
+  # Helper: COM magnetic-translation phase for all a_m, given positions
+  #   φ_m(X) = (a_m × Σ_i r_i) / (2 ℓ_B^2)  - 2π K_y m / N_φ
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[m] for all COM translations a_m, given electron positions.
+
+    pos_xy: (Ne,2) electron positions in supercell coordinates.
+    phases[m] = (a_m × Σ_i r_i) / (2 ℓ_B^2)  - 2π K_y m / N_φ,
+    with a_m × R = a_x R_y - a_y R_x.
+    """
+    R_sum = jnp.sum(pos_xy, axis=0)  # (2,)
+    # a_m × R_sum
+    cross = translations[:, 0] * R_sum[1] - translations[:, 1] * R_sum[0]  # (Nphi,)
+    com_phase = -cross / (2.0 * ellB2)  # (Nphi,)
+    total_phase = com_phase + ky_phases  # (Nphi,)
+    return total_phase
+
+  # ---------------------------------------------------------------------------
+  # Apply: COM-momentum-projected vortexformer (K_y sector)
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the COM K_y–projected vortexformer Ψ_{K_y} at positions `pos`."""
+
+    assert options.states == 0, "COM K_y–projected version currently assumes states=0."
+
+    Ne = sum(nspins)
+    full_ndim = options.ndim
+
+    # Interpret pos in the same way orbitals_apply expects.
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)   # (Ne, ndim)
+      original_shape = 'flat'
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos                          # (Ne, ndim)
+      original_shape = 'matrix'
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    # xy coordinates (where magnetic structure lives)
+    pos_xy = pos_full[:, :2]                  # (Ne,2)
+
+    # Phases per COM translation for this configuration
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (Nphi,)
+
+    # For each translation a_m, build COM-shifted coordinates: r_i → r_i + a_m
+    def translated_config(i):
+      base = pos_full                   # (Ne, full_ndim)
+      shift_xy = translations[i]        # (2,)
+      new_xy = pos_xy + shift_xy[None, :]  # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]           # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (Nphi,Ne,full_ndim)
+
+    def eval_translation(i):
+      if original_shape == 'flat':
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+
+      # Add COM + K_y phase for this translation
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each shape (Nphi,)
+
+    # Complex log-sum-exp over COM translations
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(
+        logdets_i - max_logdet + 1j * phases_i
+    )
+    total_determinant = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total_determinant))
+    overall_phase = jnp.angle(total_determinant)
+
+    if 'state_scale' in params:
+      overall_log = overall_log + params['state_scale']
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
+def make_fermi_net_with_zero_projection_COM_Ky(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = False,
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    # Psiformer-specific kwargs:
+    num_layers: int,
+    num_heads: int,
+    heads_dim: int,
+    mlp_hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
+    # vortexformer-specific:
+    N_holo: int,
+    # COM momentum K_y:
+    momind: int,
+    mom_kwargs: dict,
+) -> networks.Network:
+  """Vortexformer (Psiformer + NN-projected zeros) projected to a COM K_y sector.
+
+  Projects an arbitrary symmetric-gauge torus wavefunction onto a center-of-mass
+  momentum eigenstate along the L2 direction:
+
+    Ψ_{K_y}({r_i}) = (1/N_φ) Σ_{m=0}^{N_φ-1}
+       exp{ i [ (a_m × Σ_i r_i)/(2ℓ_B^2) - 2π K_y m / N_φ ] }
+       Ψ({r_i + a_m}),
+
+  with a_m = m L2 / N_φ and L2 the second supercell lattice vector.
+
+  Here N_φ is the number of flux quanta in the supercell, deduced from
+    |T1 × T2| / |a1 × a2|, with a1,a2 the magnetic cell vectors (1 flux each).
+  """
+
+  if envelope is None:
+    raise ValueError(
+        "make_fermi_net_with_zero_projection_COM_Ky expects an explicit "
+        "PRE_DETERMINANT envelope."
+    )
+
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection_COM_Ky must "
+        "be PRE_DETERMINANT."
+    )
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    if jastrow.upper() == 'DEFAULT':
+      jastrow = jastrows.JastrowType.SIMPLE_EE
+    else:
+      jastrow = jastrows.JastrowType[jastrow.upper()]
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )  # pytype: disable=wrong-keyword-args
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  orbitals_init, orbitals_apply = networks.make_orbitals_with_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic geometry and COM translation data
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs['abs_lattice']              # 2x2 supercell T-matrix
+  unit_cell_vectors = mom_kwargs['unit_cell_vectors']  # (2,2): magnetic a1,a2
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+  T1 = lattice[:, 0]
+  T2 = lattice[:, 1]
+
+  # Magnetic cell vectors a1,a2 (1 flux quantum per cell)
+  a1 = unit_cell_vectors[0]  # (2,)
+  a2 = unit_cell_vectors[1]  # (2,)
+
+  # Areas
+  area_cell = jnp.abs(a1[0] * a2[1] - a1[1] * a2[0])   # |a1 x a2|
+  area_super = jnp.abs(T1[0] * T2[1] - T1[1] * T2[0])  # |T1 x T2|
+
+  # Magnetic length ℓ_B^2 from |a1×a2| = 2π ℓ_B^2
+  ellB2 = area_cell / (2.0 * jnp.pi)  # scalar
+
+  # Number of flux quanta N_φ = area_super / area_cell
+  # (do this as Python ints to keep it static for JIT)
+  area_cell_f = float(area_cell)
+  area_super_f = float(area_super)
+  Nphi = int(round(area_super_f / area_cell_f))
+  if Nphi <= 0:
+    raise ValueError(f"Invalid Nphi={Nphi} from areas: cell={area_cell_f}, super={area_super_f}")
+
+  Ky = int(momind)
+  if not (0 <= Ky < Nphi):
+    raise ValueError(
+        f"K_y index momind={momind} out of range for Nphi={Nphi}."
+    )
+
+  # Fundamental COM translation step along L2 direction: b = L2 / Nphi
+  L2 = T2  # (2,)
+  step = L2 / float(Nphi)  # (2,)
+
+  # Precompute all translation vectors a_m = m * step, m=0..Nphi-1
+  m_vals = jnp.arange(Nphi, dtype=jnp.float32)  # (Nphi,)
+  translations = m_vals[:, None] * step[None, :]  # (Nphi,2)
+
+  # Static K_y phase factor: -2π K_y m / Nphi
+  ky_phases = (-2.0 * jnp.pi * Ky * m_vals / float(Nphi)) + (jnp.pi * m_vals)  # (Nphi,)
+
+  num_translations = translations.shape[0]
+
+  # ---------------------------------------------------------------------------
+  # Helper: COM magnetic-translation phase for all a_m, given positions
+  #   φ_m(X) = (a_m × Σ_i r_i) / (2 ℓ_B^2)  - 2π K_y m / N_φ
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[m] for all COM translations a_m, given electron positions.
+
+    pos_xy: (Ne,2) electron positions in supercell coordinates.
+    phases[m] = (a_m × Σ_i r_i) / (2 ℓ_B^2)  - 2π K_y m / N_φ,
+    with a_m × R = a_x R_y - a_y R_x.
+    """
+    R_sum = jnp.sum(pos_xy, axis=0)  # (2,)
+    # a_m × R_sum
+    cross = translations[:, 0] * R_sum[1] - translations[:, 1] * R_sum[0]  # (Nphi,)
+    com_phase = -cross / (2.0 * ellB2)  # (Nphi,)
+    total_phase = com_phase + ky_phases  # (Nphi,)
+    return total_phase
+
+  # ---------------------------------------------------------------------------
+  # Apply: COM-momentum-projected vortexformer (K_y sector)
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the COM K_y–projected vortexformer Ψ_{K_y} at positions `pos`."""
+
+    assert options.states == 0, "COM K_y–projected version currently assumes states=0."
+
+    Ne = sum(nspins)
+    full_ndim = options.ndim
+
+    # Interpret pos in the same way orbitals_apply expects.
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)   # (Ne, ndim)
+      original_shape = 'flat'
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos                          # (Ne, ndim)
+      original_shape = 'matrix'
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    # xy coordinates (where magnetic structure lives)
+    pos_xy = pos_full[:, :2]                  # (Ne,2)
+
+    # Phases per COM translation for this configuration
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (Nphi,)
+
+    # For each translation a_m, build COM-shifted coordinates: r_i → r_i + a_m
+    def translated_config(i):
+      base = pos_full                   # (Ne, full_ndim)
+      shift_xy = translations[i]        # (2,)
+      new_xy = pos_xy + shift_xy[None, :]  # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]           # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (Nphi,Ne,full_ndim)
+
+    def eval_translation(i):
+      if original_shape == 'flat':
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+
+      # Add COM + K_y phase for this translation
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each shape (Nphi,)
+
+    # Complex log-sum-exp over COM translations
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(
+        logdets_i - max_logdet + 1j * phases_i
+    )
+    total_determinant = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total_determinant))
+    overall_phase = jnp.angle(total_determinant)
+
+    if 'state_scale' in params:
+      overall_log = overall_log + params['state_scale']
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
 def make_vortexformer(
     nspins: Tuple[int, ...],
     charges: jnp.ndarray,
@@ -669,6 +1774,514 @@ def make_vortexformer(
 
   return networks.Network(
       options=options, init=network_init, apply=network_apply, orbitals=orbitals_apply
+  )
+
+def make_vortexformer_projection_COM_Ky(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = True,     # usually True for LLL/quasi-periodic phases
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    num_layers: int = 2,
+    num_heads: int = 4,
+    heads_dim: int = 64,
+    mlp_hidden_dims: Tuple[int, ...] = (256,),
+    use_layer_norm: bool = False,
+    pbc_lattice: jnp.ndarray = None,
+    N_holo: int = 0,
+    # COM momentum label K_y and geometry:
+    momind: int = 0,
+    mom_kwargs: dict = None,
+) -> networks.Network:
+  """Vortexformer (envelope-only Psiformer) projected onto COM momentum K_y.
+
+  Given a symmetric-gauge torus wavefunction Ψ({r_i}), construct
+
+    Ψ_{K_y}({r_i}) = (1/N_φ) Σ_{m=0}^{N_φ-1}
+        exp{ i [ (a_m × Σ_i r_i)/(2ℓ_B^2) - 2π K_y m / N_φ ] }
+        Ψ({r_i + a_m}),
+
+  with a_m = m L2 / N_φ, L2 the second supercell lattice vector, and
+  N_φ the number of flux quanta in the supercell (area_super/area_cell).
+  """
+
+  if envelope is None:
+    raise ValueError("Provide a PRE_DETERMINANT LLL-like envelope.")
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError("Envelope must be PRE_DETERMINANT.")
+
+  if mom_kwargs is None:
+    raise ValueError("mom_kwargs (with abs_lattice, unit_cell_vectors) must be provided.")
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    jastrow = (
+        jastrows.JastrowType.SIMPLE_EE
+        if jastrow.upper() == "DEFAULT"
+        else jastrows.JastrowType[jastrow.upper()]
+    )
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  # envelope-only, NN-projected zeros
+  orbitals_init, orbitals_apply = networks.make_orbitals_envelope_only_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic geometry and COM-translation data
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs["abs_lattice"]              # 2x2 matrix defining the supercell
+  unit_cell_vectors = mom_kwargs["unit_cell_vectors"]  # (2,2): magnetic a1,a2
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+  T1 = lattice[:, 0]
+  T2 = lattice[:, 1]
+
+  # Magnetic cell vectors a1,a2 (1 flux each)
+  a1 = unit_cell_vectors[0]
+  a2 = unit_cell_vectors[1]
+
+  # Areas
+  area_cell = jnp.abs(a1[0] * a2[1] - a1[1] * a2[0])   # |a1 x a2|
+  area_super = jnp.abs(T1[0] * T2[1] - T1[1] * T2[0])  # |T1 x T2|
+
+  # Magnetic length: |a1 x a2| = 2π ℓ_B^2
+  ellB2 = area_cell / (2.0 * jnp.pi)
+
+  # N_φ = area_super / area_cell; do this as Python ints outside any jitted context
+  area_cell_f = float(area_cell)
+  area_super_f = float(area_super)
+  Nphi = int(round(area_super_f / area_cell_f))
+  print(Nphi)
+  if Nphi <= 0:
+    raise ValueError(f"Invalid Nphi={Nphi} from areas: cell={area_cell_f}, super={area_super_f}")
+
+  Ky = int(momind)
+  if not (0 <= Ky < Nphi):
+    raise ValueError(f"K_y index momind={momind} out of range for Nphi={Nphi}.")
+
+  # Fundamental COM translation step along L2: b = L2 / Nphi
+  L2 = T2
+  step = L2 / float(Nphi)  # (2,)
+
+  # All COM translation vectors a_m = m * step
+  m_vals = jnp.arange(Nphi, dtype=jnp.float32)        # (Nphi,)
+  translations = m_vals[:, None] * step[None, :]      # (Nphi,2)
+
+  # Static −2π K_y m / Nphi factor
+  ky_phases = (-2.0 * jnp.pi * Ky * m_vals / float(Nphi)) + (jnp.pi * m_vals)    # (Nphi,)
+
+  num_translations = translations.shape[0]
+
+  # ---------------------------------------------------------------------------
+  # Helper: COM phase for all translations, given positions
+  #   φ_m(X) = (a_m × Σ_i r_i)/(2 ℓ_B^2)  −  2π K_y m / N_φ
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[m] for all COM translations a_m, given electron positions.
+
+    pos_xy: (Ne,2) electron positions in supercell coordinates.
+    a_m × R_sum = a_x R_y − a_y R_x.
+    """
+    R_sum = jnp.sum(pos_xy, axis=0)  # (2,)
+    cross = translations[:, 0] * R_sum[1] - translations[:, 1] * R_sum[0]  # (Nphi,)
+    com_phase = -cross / (2.0)  # (Nphi,)
+    total_phase = com_phase + ky_phases
+    return total_phase  # (Nphi,)
+
+  # ---------------------------------------------------------------------------
+  # Apply: COM K_y–projected vortexformer
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the COM K_y–projected vortexformer Ψ_{K_y} at positions `pos`."""
+
+    if options.states:
+      # You *can* generalize to states>0, but simplest now:
+      raise NotImplementedError("COM K_y projector currently assumes states=0.")
+
+    Ne = sum(nspins)
+    full_ndim = options.ndim
+
+    # Accept both flattened and (Ne,ndim) positions, like in your other code
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)
+      original_shape = "flat"
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos
+      original_shape = "matrix"
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    pos_xy = pos_full[:, :2]  # (Ne,2)
+
+    # Phases for this configuration
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (Nphi,)
+
+    # Build COM-shifted configurations: r_i -> r_i + a_m
+    def translated_config(i):
+      base = pos_full                   # (Ne,full_ndim)
+      shift_xy = translations[i]        # (2,)
+      new_xy = pos_xy + shift_xy[None, :]  # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]           # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (Nphi,Ne,full_ndim)
+
+    # Evaluate base vortexformer for each translated configuration
+    def eval_translation(i):
+      if original_shape == "flat":
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each (Nphi,)
+
+    # Complex log-sum-exp over translations: Σ_m e^{logdet_m + i phase_m}
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(logdets_i - max_logdet + 1j * phases_i)
+    total = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total))
+    overall_phase = jnp.angle(total)
+
+    if "state_scale" in params:
+      overall_log = overall_log + params["state_scale"]
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
+  )
+
+def make_vortexformer_projection_COM_Kx(
+    nspins: Tuple[int, ...],
+    charges: jnp.ndarray,
+    *,
+    ndim: int = 3,
+    determinants: int = 16,
+    states: int = 0,
+    envelope: Optional[envelopes.Envelope] = None,
+    feature_layer: Optional[networks.FeatureLayer] = None,
+    jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
+    complex_output: bool = True,     # usually True for LLL/quasi-periodic phases
+    bias_orbitals: bool = False,
+    rescale_inputs: bool = False,
+    num_layers: int = 2,
+    num_heads: int = 4,
+    heads_dim: int = 64,
+    mlp_hidden_dims: Tuple[int, ...] = (256,),
+    use_layer_norm: bool = False,
+    pbc_lattice: jnp.ndarray = None,
+    N_holo: int = 0,
+    # COM momentum label K_y and geometry:
+    momind: int = 0,
+    mom_kwargs: dict = None,
+) -> networks.Network:
+  """Vortexformer (envelope-only Psiformer) projected onto COM momentum K_x.
+
+  Given a symmetric-gauge torus wavefunction Ψ({r_i}), construct
+
+    Ψ_{K_x}({r_i}) = (1/N_φ) Σ_{m=0}^{N_φ-1}
+        exp{ i [ (a_m × Σ_i r_i)/(2ℓ_B^2) - 2π K_y m / N_φ ] }
+        Ψ({r_i + a_m}),
+
+  with a_m = m L2 / N_φ, L2 the second supercell lattice vector, and
+  N_φ the number of flux quanta in the supercell (area_super/area_cell).
+  """
+
+  if envelope is None:
+    raise ValueError("Provide a PRE_DETERMINANT LLL-like envelope.")
+  if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+    raise ValueError("Envelope must be PRE_DETERMINANT.")
+
+  if mom_kwargs is None:
+    raise ValueError("mom_kwargs (with abs_lattice, unit_cell_vectors) must be provided.")
+
+  if feature_layer is None:
+    natoms = charges.shape[0]
+    feature_layer = networks.make_ferminet_features(
+        natoms, nspins, ndim=ndim, rescale_inputs=rescale_inputs
+    )
+
+  if isinstance(jastrow, str):
+    jastrow = (
+        jastrows.JastrowType.SIMPLE_EE
+        if jastrow.upper() == "DEFAULT"
+        else jastrows.JastrowType[jastrow.upper()]
+    )
+
+  options = PsiformerOptions(
+      ndim=ndim,
+      determinants=determinants,
+      states=states,
+      envelope=envelope,
+      feature_layer=feature_layer,
+      jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
+      complex_output=complex_output,
+      bias_orbitals=bias_orbitals,
+      full_det=True,
+      rescale_inputs=rescale_inputs,
+      num_layers=num_layers,
+      num_heads=num_heads,
+      heads_dim=heads_dim,
+      mlp_hidden_dims=mlp_hidden_dims,
+      use_layer_norm=use_layer_norm,
+      pbc_lattice=pbc_lattice,
+  )
+
+  psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
+
+  # envelope-only, NN-projected zeros
+  orbitals_init, orbitals_apply = networks.make_orbitals_envelope_only_zero_projection(
+      nspins=nspins,
+      charges=charges,
+      options=options,
+      equivariant_layers=psiformer_layers,
+      N_holo=N_holo,
+  )
+
+  def network_init(key: chex.PRNGKey) -> networks.ParamTree:
+    return orbitals_init(key)
+
+  # ---------------------------------------------------------------------------
+  # Magnetic geometry and COM-translation data
+  # ---------------------------------------------------------------------------
+
+  abs_lattice = mom_kwargs["abs_lattice"]              # 2x2 matrix defining the supercell
+  unit_cell_vectors = mom_kwargs["unit_cell_vectors"]  # (2,2): magnetic a1,a2
+
+  # Supercell lattice vectors T1,T2 (columns)
+  lattice = targetmom.lattice_vecs(
+      unit_cell_vectors[0], unit_cell_vectors[1], abs_lattice
+  )  # shape (2,2)
+  T1 = lattice[:, 0]
+  T2 = lattice[:, 1]
+
+  # Magnetic cell vectors a1,a2 (1 flux each)
+  a1 = unit_cell_vectors[0]
+  a2 = unit_cell_vectors[1]
+
+  # Areas
+  area_cell = jnp.abs(a1[0] * a2[1] - a1[1] * a2[0])   # |a1 x a2|
+  area_super = jnp.abs(T1[0] * T2[1] - T1[1] * T2[0])  # |T1 x T2|
+
+  # Magnetic length: |a1 x a2| = 2π ℓ_B^2
+  ellB2 = area_cell / (2.0 * jnp.pi)
+
+  # N_φ = area_super / area_cell; do this as Python ints outside any jitted context
+  area_cell_f = float(area_cell)
+  area_super_f = float(area_super)
+  Nphi = int(round(area_super_f / area_cell_f))
+  print(Nphi)
+  if Nphi <= 0:
+    raise ValueError(f"Invalid Nphi={Nphi} from areas: cell={area_cell_f}, super={area_super_f}")
+
+  Ky = int(momind)
+  if not (0 <= Ky < Nphi):
+    raise ValueError(f"K_y index momind={momind} out of range for Nphi={Nphi}.")
+
+  # Fundamental COM translation step along L2: b = L2 / Nphi
+  L2 = T1
+  step = L2 / float(Nphi)  # (2,)
+
+  # All COM translation vectors a_m = m * step
+  m_vals = jnp.arange(Nphi, dtype=jnp.float32)        # (Nphi,)
+  translations = m_vals[:, None] * step[None, :]      # (Nphi,2)
+
+  # Static −2π K_y m / Nphi factor
+  ky_phases = (-2.0 * jnp.pi * Ky * m_vals / float(Nphi)) + (jnp.pi * m_vals)    # (Nphi,)
+
+  num_translations = translations.shape[0]
+
+  # ---------------------------------------------------------------------------
+  # Helper: COM phase for all translations, given positions
+  #   φ_m(X) = (a_m × Σ_i r_i)/(2 ℓ_B^2)  −  2π K_y m / N_φ
+  # ---------------------------------------------------------------------------
+
+  def compute_phases_for_translations(pos_xy: jnp.ndarray) -> jnp.ndarray:
+    """Return phases[m] for all COM translations a_m, given electron positions.
+
+    pos_xy: (Ne,2) electron positions in supercell coordinates.
+    a_m × R_sum = a_x R_y − a_y R_x.
+    """
+    R_sum = jnp.sum(pos_xy, axis=0)  # (2,)
+    cross = translations[:, 0] * R_sum[1] - translations[:, 1] * R_sum[0]  # (Nphi,)
+    com_phase = -cross / (2.0)  # (Nphi,)
+    total_phase = com_phase + ky_phases
+    return total_phase  # (Nphi,)
+
+  # ---------------------------------------------------------------------------
+  # Apply: COM K_y–projected vortexformer
+  # ---------------------------------------------------------------------------
+
+  def network_apply(
+      params,
+      pos: jnp.ndarray,
+      spins: jnp.ndarray,
+      atoms: jnp.ndarray,
+      charges: jnp.ndarray,
+  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the COM K_y–projected vortexformer Ψ_{K_y} at positions `pos`."""
+
+    if options.states:
+      # You *can* generalize to states>0, but simplest now:
+      raise NotImplementedError("COM K_y projector currently assumes states=0.")
+
+    Ne = sum(nspins)
+    full_ndim = options.ndim
+
+    # Accept both flattened and (Ne,ndim) positions, like in your other code
+    if pos.ndim == 1:
+      if pos.shape[0] != Ne * full_ndim:
+        raise ValueError(
+            f"Flattened pos has length {pos.shape[0]}, expected {Ne * full_ndim}."
+        )
+      pos_full = pos.reshape(Ne, full_ndim)
+      original_shape = "flat"
+    elif pos.ndim == 2:
+      if pos.shape != (Ne, full_ndim):
+        raise ValueError(
+            f"pos has shape {pos.shape}, expected ({Ne}, {full_ndim})."
+        )
+      pos_full = pos
+      original_shape = "matrix"
+    else:
+      raise ValueError("pos must be 1D ((Ne*ndim,)) or 2D ((Ne,ndim)).")
+
+    pos_xy = pos_full[:, :2]  # (Ne,2)
+
+    # Phases for this configuration
+    phases_per_translation = compute_phases_for_translations(pos_xy)  # (Nphi,)
+
+    # Build COM-shifted configurations: r_i -> r_i + a_m
+    def translated_config(i):
+      base = pos_full                   # (Ne,full_ndim)
+      shift_xy = translations[i]        # (2,)
+      new_xy = pos_xy + shift_xy[None, :]  # (Ne,2)
+      if full_ndim == 2:
+        out = new_xy
+      else:
+        higher = base[:, 2:]           # (Ne, full_ndim-2)
+        out = jnp.concatenate([new_xy, higher], axis=1)
+      return out
+
+    translated_full = jax.vmap(translated_config)(
+        jnp.arange(num_translations)
+    )  # (Nphi,Ne,full_ndim)
+
+    # Evaluate base vortexformer for each translated configuration
+    def eval_translation(i):
+      if original_shape == "flat":
+        t_pos = translated_full[i].reshape(Ne * full_ndim)
+      else:
+        t_pos = translated_full[i]
+
+      orbitals = orbitals_apply(params, t_pos, spins, atoms, charges)
+      phase_i, logdet_i = network_blocks.logdet_matmul(orbitals)
+      phase_i = phase_i + phases_per_translation[i]
+      return phase_i, logdet_i
+
+    phases_i, logdets_i = jax.vmap(eval_translation)(
+        jnp.arange(num_translations)
+    )  # each (Nphi,)
+
+    # Complex log-sum-exp over translations: Σ_m e^{logdet_m + i phase_m}
+    max_logdet = jnp.max(logdets_i)
+    shifted_exps = jnp.exp(logdets_i - max_logdet + 1j * phases_i)
+    total = jnp.sum(shifted_exps) / num_translations
+
+    overall_log = max_logdet + jnp.log(jnp.abs(total))
+    overall_phase = jnp.angle(total)
+
+    if "state_scale" in params:
+      overall_log = overall_log + params["state_scale"]
+
+    return overall_phase, overall_log
+
+  return networks.Network(
+      options=options,
+      init=network_init,
+      apply=network_apply,
+      orbitals=orbitals_apply,
   )
 
 # def make_fermi_net_momentum_projected(
@@ -913,6 +2526,7 @@ def make_fermi_net_momentum_projected(
     envelope: Optional[envelopes.Envelope] = None,
     feature_layer: Optional[networks.FeatureLayer] = None,
     jastrow: Union[str, jastrows.JastrowType] = jastrows.JastrowType.SIMPLE_EE,
+    jastrow_kwargs: dict = {},
     complex_output: bool = False,
     bias_orbitals: bool = False,
     rescale_inputs: bool = False,
@@ -923,7 +2537,8 @@ def make_fermi_net_momentum_projected(
     num_heads: int,
     heads_dim: int,
     mlp_hidden_dims: Tuple[int, ...],
-    use_layer_norm: bool
+    use_layer_norm: bool,
+    pbc_lattice: jnp.ndarray,
 ) -> networks.Network:
   """Psiformer with stacked Self Attention layers.
 
@@ -977,6 +2592,7 @@ def make_fermi_net_momentum_projected(
       envelope=envelope,
       feature_layer=feature_layer,
       jastrow=jastrow,
+      jastrow_kwargs=jastrow_kwargs,
       complex_output=complex_output,
       bias_orbitals=bias_orbitals,
       full_det=True,  # Required for Psiformer.
@@ -986,8 +2602,8 @@ def make_fermi_net_momentum_projected(
       heads_dim=heads_dim,
       mlp_hidden_dims=mlp_hidden_dims,
       use_layer_norm=use_layer_norm,
-
-  )  # pytype: disable=wrong-keyword-args
+      pbc_lattice = pbc_lattice,
+  )
 
   psiformer_layers = make_psiformer_layers(nspins, charges.shape[0], options)
 
