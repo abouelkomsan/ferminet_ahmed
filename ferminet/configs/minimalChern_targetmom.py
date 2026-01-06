@@ -24,14 +24,21 @@ import argparse
 import os
 import logging
 import jax
-
+from jax.extend import backend as jbackend
 import sys
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 logging.basicConfig(
     level=logging.INFO,  # Adjust the logging level as needed
     format='%(asctime)s - %(levelname)s - %(message)s',
     stream=sys.stderr  # Send logs to stderr
 )
+
+_backend = jbackend.get_backend()
+logging.info(f"Backend platform: {_backend.platform}")
+logging.info(f"Platform version: {getattr(_backend, 'platform_version', 'n/a')}")
+logging.info(f"Devices: {jax.devices()}")
 
 matmul_precision = 'float32' # 'F64_F64_F64', 'float32'
 logging.info(f"Setting jax_default_matmul_precision to {matmul_precision}")
@@ -122,22 +129,22 @@ def get_config(momind):
   cfg.network.psiformer.heads_dim = 64
   cfg.network.psiformer.mlp_hidden_dims  = (256,)
   cfg.network.determinants = 4
-  cfg.batch_size = 50
+  cfg.batch_size = 20
   cfg.optim.optimizer = "none"
-  cfg.optim.iterations = 15000
+  cfg.optim.iterations = 40000
   #cfg.optim.lr.rate = 0.0001
   #cfg.optim.lr.decay = 1.5
   #cfg.optim.lr.delay = 1.0
   #cfg.mcmc.move_width = 2.0
   #cfg.mcmc.init_width = 3.0
-  cfg.initialization.donor_filename = f"/work/submit/ahmed95/data/8particles_inference/{momind}"
+  cfg.initialization.donor_filename = "/data/ahmed95/NN_minimalChern/8particles_withflux/0.5/"
   cfg.initialization.flatten_num_devices = False
   cfg.initialization.randomize = False
   cfg.initialization.ignore_batch = True
   cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.restore_path = 'ferminet_2025_08_24_11:33:55 copy'
-  cfg.log.save_path = f"/work/submit/ahmed95/data/8particles_inference2/{momind}"
+  cfg.log.save_path = f"/data/ahmed95/8particles_inference_withflux/{momind}"
   cfg.log.save_frequency = 40
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")

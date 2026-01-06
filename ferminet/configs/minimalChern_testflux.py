@@ -23,6 +23,23 @@ import datetime
 import inspect
 import jax
 import logging
+from jax.extend import backend as jbackend
+import sys
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+
+
+logging.basicConfig(
+    level=logging.INFO,  # Adjust the logging level as needed
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr  # Send logs to stderr
+)
+
+_backend = jbackend.get_backend()
+logging.info(f"Backend platform: {_backend.platform}")
+logging.info(f"Platform version: {getattr(_backend, 'platform_version', 'n/a')}")
+logging.info(f"Devices: {jax.devices()}")
 
 matmul_precision = 'float32' # 'F64_F64_F64', 'float32'
 logging.info(f"Setting jax_default_matmul_precision to {matmul_precision}")
@@ -93,7 +110,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (1, 0)
+  cfg.system.electrons = (8, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -106,52 +123,45 @@ def get_config():
   a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
   #a1 = a0* np.array([1,0])
   a2 = a0 * np.array([0,1])
-  Tmatrix = np.array([[3,0], [0, 3]]) 
+  Tmatrix = np.array([[4,0], [0, 6]]) 
   lattice = lattice_vecs(a1, a2, Tmatrix)
-  rec = 2*np.pi*np.linalg.inv(lattice)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
-  eoverhbar = e_over_hbar()
-  flux1 = 3.0
-  flux2 = 0.0
-  threadedflux = (flux1*rec[0,:] + flux2*rec[1,:]) 
+  rec = 2*np.pi*np.linalg.inv(lattice)
+  flux1 = 0.0
+  flux2 = 1.0
+  threadedflux = flux1*rec[0,:] + flux2*rec[1,:] 
   """Defining KE, potential and interaction parameters"""
   meff = 1.0
   KE_prefactor = hbar2_over_m_eff(meff)
   print(KE_prefactor)
   pp_coffs = np.array([0.0, 0.0, 0.0])  
   pp_phases = np.array([0.0, 0.0, 0.0])
-  epsilon = 5.0
-  intcoff = 0.0
+  intcoff = (coulomb_prefactor(5.0))/KE_prefactor
+  print(intcoff)
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_minimalChern.local_energy"
-  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "default","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": 0.0,"threadedflux": threadedflux}}
-  cfg.network.network_type = "psiformer"
+  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": threadedflux}}
+  cfg.targetmom.mom = None
+  cfg.network.network_type = "psiformer" 
   cfg.network.complex = True
-  cfg.network.psiformer.num_layers = 2
-  cfg.network.psiformer.num_heads = 4
-  cfg.network.psiformer.heads_dim = 32
-  cfg.network.psiformer.mlp_hidden_dims  = (128,)
-  cfg.network.determinants = 1
+  cfg.network.psiformer.num_layers = 4
+  cfg.network.psiformer.num_heads = 6
+  cfg.network.psiformer.heads_dim = 64
+  cfg.network.psiformer.mlp_hidden_dims  = (256,)
+  cfg.network.determinants = 4
   cfg.batch_size = 1024
-  cfg.optim.iterations = 1000000
-  #cfg.optim.lr.onecycle = True
-  #cfg.optim.lr.onecycle_steps = 300000
-  #cfg.optim.lr.rate_max = 30.0
-  #cfg.optim.lr.onecycle_start = 1.0
-  #cfg.optim.lr.onecycle_end = 0.0001 
-  cfg.optim.lr.rate = 0.001
-  #cfg.optim.lr.decay = 0.0
-  #cfg.optim.kfac.momentum = 0.2
-  cfg.mcmc.enforce_symmetry_by_shift = "none"
-  #cfg.mcmc.symmetry_shift_kwargs = {"lattice": lattice,'move_width': 1}
-  #cfg.optim.lr.delay = 50000
+  cfg.optim.iterations = 100000
+  cfg.optim.lr.rate = 0.00001
+  cfg.optim.lr.decay = 0.0
+  #cfg.optim.lr.decay = 1.5
+  #cfg.optim.lr.delay = 1.0
   #cfg.mcmc.move_width = 2.0
   #cfg.mcmc.init_width = 3.0
-  #cfg.mcmc.steps = 20
-  cfg.network.jastrow = 'none'
-  cfg.initialization.donor_filename = "none"
+  cfg.initialization.donor_filename = "/data/ahmed95/NN_minimalChern/8particles_withflux/1.0/"
+  cfg.log.save_path = '/data/ahmed95/NN_minimalChern/8particles_withflux/1.0/extrarun/'
   cfg.initialization.flatten_num_devices = False
-  cfg.targetmom.mom = None
+  cfg.initialization.ignore_batch = False
+  cfg.initialization.randomize = False
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.save_path = 'ferminet_2025_09_08_15:31:46'
@@ -166,19 +176,19 @@ def get_config():
   cfg.network.make_envelope_fn = ( "ferminet.envelopes.make_null_envelope" )
   #cfg.network.make_envelope_kwargs = {"kpoints": kpoints}
   cfg.network.full_det = True
-    # New functionality: Create a timestamped folder and save the function body
-  timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
-  cfg.log.save_path = f'/work/submit/ahmed95/minimalChern_NN/ferminet_{timestamp}'
-  os.makedirs(cfg.log.save_path, exist_ok=True)
+  #   # New functionality: Create a timestamped folder and save the function body
+  # timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
+  # cfg.log.save_path = f'/work/submit/ahmed95/minimalChern_NN/ferminet_{timestamp}'
+  # os.makedirs(cfg.log.save_path, exist_ok=True)
 
-  # Get the body of the current function
-  function_body = inspect.getsource(get_config)
+  # # Get the body of the current function
+  # function_body = inspect.getsource(get_config)
 
-  # Write the function body to a text file inside the folder
-  file_path = os.path.join(cfg.log.save_path, 'get_config_body.txt')
-  with open(file_path, 'w') as file:
-    file.write(function_body)
-  print(f"Folder '{cfg.log.save_path}' created and function body saved to '{file_path}'.")
+  # # Write the function body to a text file inside the folder
+  # file_path = os.path.join(cfg.log.save_path, 'get_config_body.txt')
+  # with open(file_path, 'w') as file:
+  #   file.write(function_body)
+  # print(f"Folder '{cfg.log.save_path}' created and function body saved to '{file_path}'.")
 
   return cfg
 

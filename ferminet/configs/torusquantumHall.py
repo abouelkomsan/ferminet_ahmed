@@ -24,7 +24,22 @@ import inspect
 import jax
 import jax.numpy as jnp
 import logging
+from jax.extend import backend as jbackend
+import sys
+from ferminet import train
 from ferminet import ellipticfunctions
+
+
+
+logging.basicConfig(
+    level=logging.INFO,  # Adjust the logging level as needed
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr  # Send logs to stderr
+)
+
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 
 matmul_precision = 'float32' # 'F64_F64_F64', 'float32'
 logging.info(f"Setting jax_default_matmul_precision to {matmul_precision}")
@@ -193,7 +208,11 @@ def make_zero_lattice(potential_lattice: np.ndarray,
 def get_config():
   # Get default options.
   cfg = base_config.default()
+<<<<<<< HEAD
   cfg.system.electrons = (9, 0)
+=======
+  cfg.system.electrons = (12, 0)
+>>>>>>> a8a0bd5b2d73aed7245978fca62fb49374faada0
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -205,7 +224,11 @@ def get_config():
   a = np.sqrt((4 * np.pi * 1**2) / np.sqrt(3))  # primitive 1-flux length
   a1 = a * np.array([np.sqrt(3) / 2, -0.5])
   a2 = a * np.array([0, 1.0])
+<<<<<<< HEAD
   Tmatrix = np.array([[3,-3], [3, 6]])  
+=======
+  Tmatrix = np.array([[6,0], [0, 6]])  
+>>>>>>> a8a0bd5b2d73aed7245978fca62fb49374faada0
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
@@ -217,10 +240,14 @@ def get_config():
   pp_coffs = np .array([0.0, 0.0, 0.0])  
   pp_phases = np.array([0.0, 0.0, 0.0])
   #epsilon = 5.0
+<<<<<<< HEAD
   intcoff = 7.0
+=======
+  intcoff = 0.0
+>>>>>>> a8a0bd5b2d73aed7245978fca62fb49374faada0
   #print(epsilon)
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_quantumHall.local_energy"
-  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_type": "Coulomb","potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff,"lambda_soft":10.0},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": np.array([0,0])}}
+  cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_type": "Coulomb","potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": np.array([0,0])}}
   cfg.network.network_type = "psiformer_magfield"
   cfg.network.complex = True
   cfg.network.psiformer.num_layers = 4
@@ -262,7 +289,7 @@ def get_config():
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.save_path = 'ferminet_2025_09_08_15:31:46'
-  cfg.log.save_frequency = 40
+  cfg.log.save_frequency = 30
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {
@@ -280,7 +307,7 @@ def get_config():
   cfg.network.full_det = True
   # New functionality: Create a timestamped folder and save the function body
   timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
-  cfg.log.save_path = f'/work/submit/ahmed95/torusquantumHall/ferminet_{timestamp}'
+  cfg.log.save_path = f'/data/ahmed95/torusquantumHall/ferminet_{timestamp}'
   os.makedirs(cfg.log.save_path, exist_ok=True)
 
   # Get the body of the current function

@@ -23,6 +23,19 @@ import datetime
 import inspect
 import jax
 import logging
+from jax.extend import backend as jbackend
+import sys
+from ferminet import train
+
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+
+logging.basicConfig(
+    level=logging.INFO,  # Adjust the logging level as needed
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr  # Send logs to stderr
+)
 
 matmul_precision = 'float32' # 'F64_F64_F64', 'float32'
 logging.info(f"Setting jax_default_matmul_precision to {matmul_precision}")
@@ -93,7 +106,7 @@ def coulomb_prefactor(epsilon_r: float) -> float:
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (9, 0)
+  cfg.system.electrons = (8, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -106,7 +119,7 @@ def get_config():
   a1 = a0 * np.array([np.sqrt(3)/2,-0.5])
   #a1 = a0* np.array([1,0])
   a2 = a0 * np.array([0,1])
-  Tmatrix = np.array([[3,-3], [3, 6]]) 
+  Tmatrix = np.array([[4,0], [0, 6]]) 
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
@@ -137,9 +150,8 @@ def get_config():
   #cfg.optim.lr.rate_max = 30.0
   #cfg.optim.lr.onecycle_start = 1.0
   #cfg.optim.lr.onecycle_end = 0.0001 
-  #cfg.optim.lr.rate = 0.001
+  cfg.optim.lr.rate = 0.0001
   #cfg.optim.lr.decay = 0.0
-  #cfg.optim.lr.delay = 100000
   #cfg.optim.kfac.momentum = 0.2
   cfg.optim.lr.rate = 0.001
   cfg.mcmc.enforce_symmetry_by_shift = "none"
@@ -147,11 +159,11 @@ def get_config():
   #cfg.optim.lr.delay = 50000
   #cfg.mcmc.move_width = 2.0
   #cfg.mcmc.init_width = 3.0
-  cfg.mcmc.steps = 50
+  cfg.mcmc.steps = 30
   cfg.network.jastrow = 'none'
-  cfg.initialization.donor_filename = "/ceph/submit/data/user/a/ahmed95/minimalChern_NN/ferminet_2025_10_27_10:01:26"
-  #cfg.initialization.modifications = ['orbital-rnd']
+  cfg.initialization.donor_filename = "none"
   cfg.initialization.flatten_num_devices = False
+  cfg.initialization.randomize = False
   cfg.initialization.ignore_batch = False
   cfg.initialization.randomize = False
   cfg.targetmom.mom = None
@@ -170,7 +182,7 @@ def get_config():
   cfg.network.full_det = True
     # New functionality: Create a timestamped folder and save the function body
   timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
-  cfg.log.save_path = f'/work/submit/ahmed95/minimalChern_NN/ferminet_{timestamp}'
+  cfg.log.save_path = f'/data/ahmed95/NN_minimalChern/ferminet_{timestamp}'
   os.makedirs(cfg.log.save_path, exist_ok=True)
 
   # Get the body of the current function
@@ -184,4 +196,5 @@ def get_config():
 
   return cfg
 
-
+cfg = get_config()
+train.train(cfg)

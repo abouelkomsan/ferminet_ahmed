@@ -15,6 +15,7 @@
 
 source ~/venv/ferminet313/bin/activate
 cd /work/submit/ahmed95/ferminet_ahmed/
-ferminet --config ferminet/configs/minimalChern.py 
+ferminet --config ferminet/configs/minimalChern2.py 
+#python ferminet/RDM.py
 
 
