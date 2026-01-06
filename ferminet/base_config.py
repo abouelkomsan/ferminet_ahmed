@@ -319,6 +319,7 @@ def default() -> ml_collections.ConfigDict:
         'flatten_num_devices': False,
         'ignore_batch': False, 
         'randomize': True,
+        'reset_t': False,
       },
       'targetmom': {
         'mom': None, #None or integer
@@ -348,6 +349,7 @@ def default() -> ml_collections.ConfigDict:
           # 'random' is necessary for some systems, especially double
           # excitations.
           'excitation_type': 'ordered',
+          "laughlin_fraction": 1.0,
       },
   })
 

@@ -193,7 +193,7 @@ def make_zero_lattice(potential_lattice: np.ndarray,
 def get_config():
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (12, 0)
+  cfg.system.electrons = (4, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -205,7 +205,7 @@ def get_config():
   a = np.sqrt((4 * np.pi * 1**2) / np.sqrt(3))  # primitive 1-flux length
   a1 = a * np.array([np.sqrt(3) / 2, -0.5])
   a2 = a * np.array([0, 1.0])
-  Tmatrix = np.array([[6,0], [0, 6]])  
+  Tmatrix = np.array([[2,-2], [4, 2]])  
   lattice = lattice_vecs(a1, a2, Tmatrix)
   potential_lattice = lattice_vecs(a1, a2, np.array([[1,0], [0, 1]]))
   #kpoints = envelopes.make_kpoints(lattice, cfg.system.electrons)
@@ -221,17 +221,18 @@ def get_config():
   #print(epsilon)
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_quantumHall.local_energy"
   cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": np.array([0,0])}}
-  cfg.network.network_type = "vortexformer"
+  cfg.network.network_type = "psiformer_magfield"
   cfg.network.complex = True
   cfg.network.psiformer.num_layers = 4
   cfg.network.psiformer.num_heads = 4
   cfg.network.psiformer.heads_dim = 64
   cfg.network.psiformer.mlp_hidden_dims  = (256,)
   cfg.network.determinants = 2
-  cfg.batch_size = 1024*2
-  cfg.optim.iterations = 1000000
-  cfg.optim.lr.rate = 0.05
-  #cfg.optim.lr.decay = 0.0
+  cfg.batch_size = 1024
+  cfg.optim.iterations = 1000
+  cfg.optim.optimizer = "none"
+  cfg.optim.lr.rate = 0.1
+  cfg.optim.lr.decay = 0.0
   cfg.optim.kfac.norm_constraint = 1e-4
   #cfg.optim.lr.onecycle = True
   #cfg.optim.lr.onecycle_steps = 300000
@@ -245,7 +246,7 @@ def get_config():
   #cfg.mcmc.move_width = 2.0
   #cfg.mcmc.init_width = 3.0
   cfg.mcmc.steps = 20
-  cfg.initialization.donor_filename = "none"
+  cfg.initialization.donor_filename = "/work/submit/ahmed95/torusquantumHall/ferminet_2025_12_28_16:55:13"
   #cfg.initialization.modifications = ['orbital-rnd']
   cfg.initialization.flatten_num_devices = False
   cfg.initialization.ignore_batch = False
@@ -255,11 +256,11 @@ def get_config():
   #complex_zeros = init_random_zeros(9, lattice[:,0], lattice[:,1], key)
   zeros_cart, zeros_complex = make_zero_lattice(potential_lattice, Tmatrix, z_scale=1.0)
   zeros_complex = zeros_complex - zeros_complex.mean()
-  cfg.network.psiformer_magfield.kwargs = {"lattice": lattice, "N_phi": np.array(36.0),"zeros": jnp.asarray(zeros_complex, jnp.complex64),"rescale": np.array(1.0),"N_holo": 36, "N_anti": 0,"bf_strength_init" : 0.01}
+  cfg.network.psiformer_magfield.kwargs = {"lattice": lattice, "N_phi": np.array(27.0),"zeros": jnp.asarray(zeros_complex, jnp.complex64),"rescale": np.array(1.0),"N_holo": 27, "N_anti": 0,"bf_strength_init" : 0.01}
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.save_path = 'ferminet_2025_09_08_15:31:46'
-  cfg.log.save_frequency = 40
+  cfg.log.save_frequency = 10
   cfg.network.make_feature_layer_fn = (
       "ferminet.pbc.feature_layer.make_pbc_feature_layer")
   cfg.network.make_feature_layer_kwargs = {
@@ -277,7 +278,7 @@ def get_config():
   cfg.network.full_det = True
   # New functionality: Create a timestamped folder and save the function body
   timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S')
-  cfg.log.save_path = f'/work/submit/ahmed95/torusquantumHall/ferminet_{timestamp}'
+  cfg.log.save_path = f'/work/submit/ahmed95/torusquantumHall/ferminet_inference_9_particles_intstrength{intcoff}'
   os.makedirs(cfg.log.save_path, exist_ok=True)
 
   # Get the body of the current function

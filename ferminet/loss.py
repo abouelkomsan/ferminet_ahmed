@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import kfac_jax
 from typing_extensions import Protocol
 from ferminet import targetmom
-
+from ferminet import chunked_vmap
 
 @chex.dataclass
 class AuxiliaryLossData:
@@ -186,7 +186,7 @@ def make_loss(network: networks.LogFermiNetLike,
     loss is averaged over the batch and over all devices inside a pmap.
   """
   vmap = jax.vmap if max_vmap_batch_size == 0 else functools.partial(
-      folx.batched_vmap, max_batch_size=max_vmap_batch_size)
+      chunked_vmap.batched_vmap, max_batch_size=max_vmap_batch_size)
   batch_local_energy = vmap(
       local_energy,
       in_axes=(

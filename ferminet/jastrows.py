@@ -184,7 +184,7 @@ def _jastrow_ee(
 def make_simple_ee_jastrow(
     ndim: int = 3,
     interaction_strength: float = 1.0,
-    use_kfac_dense: bool = True,
+    use_kfac_dense: bool = False,
     kfac_dense_eps: float = 1e-4,
 ):
   """Creates a Jastrow factor for electron-electron cusps, with optional KFAC tagging."""

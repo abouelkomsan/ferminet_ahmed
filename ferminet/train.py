@@ -39,6 +39,7 @@ from ferminet.utils import utils
 from ferminet.utils import writers
 from ferminet import surgery
 from ferminet import targetmom
+from ferminet import ellipticfunctions
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -48,7 +49,6 @@ import numpy as np
 import optax
 from typing_extensions import Protocol
 from datetime import datetime
-
 
 
 def _assign_spin_configuration(
@@ -532,6 +532,26 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         N_holo = cfg.network.psiformer_magfield.kwargs['N_holo'],
         **cfg.network.psiformer,
     )
+  elif cfg.network.network_type == 'psiformer_magfield_momind':
+    network = psiformer.make_fermi_net_with_zero_projection_COM_Kx(
+        nspins,
+        charges,
+        ndim=cfg.system.ndim,
+        determinants=cfg.network.determinants,
+        states=cfg.system.states,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        jastrow=cfg.network.get('jastrow', 'default'),
+        jastrow_kwargs = cfg.network.jastrow_kwargs,
+        bias_orbitals=cfg.network.bias_orbitals,
+        rescale_inputs=cfg.network.get('rescale_inputs', False),
+        complex_output=use_complex,
+        pbc_lattice = cfg.system.pbc_lattice,
+        N_holo = cfg.network.psiformer_magfield.kwargs['N_holo'],
+        momind = cfg.targetmom.mom,
+        mom_kwargs = cfg.targetmom.kwargs,
+        **cfg.network.psiformer,
+    )
   elif cfg.network.network_type == 'vortexformer':
     network = psiformer.make_vortexformer(
         nspins,
@@ -712,6 +732,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       data = networks.FermiNetData(
           positions=pos, spins=spins, atoms=batch_atoms, charges=batch_charges
       )
+    elif cfg.initialization.reset_t == True:
+      t_init = 0
+      data = donor_data
+      mcmc_width_ckpt = donor_mcmc_width_ckpt
+      density_state_ckpt = donor_density_state_ckpt
+      opt_state_ckpt = donor_opt_state_ckpt
     else:
       t_init = donor_t_init
       data = donor_data
@@ -829,6 +855,81 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
           scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
           states=cfg.system.states,
       )
+
+    elif cfg.pretrain.method == 'laughlin':
+      # Use a fixed spin configuration across the batch, same as HF pretrain.
+      pretrain_spins = spins[0, 0]
+
+      # Split RNG for pmapped pretrain_laughlin.
+      sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+
+      # These three should be provided by you / your cfg:
+      #   - cfg.pretrain.laughlin_alpha : COM zeros, shape (q,), complex
+      #   - cfg.pretrain.laughlin_q     : integer Laughlin parameter
+      #   - cfg.pretrain.laughlin_consts: dict of geometry/sigma constants
+
+      magfield_kwargs = cfg.network.psiformer_magfield.kwargs
+      N_phi  = int(magfield_kwargs["N_phi"])
+      laughlin_q = magfield_kwargs["laughlin_q"]
+      # --- geometry constants (shared) ---
+      lattice = cfg.system.pbc_lattice
+      L1 = lattice[:, 0].astype(jnp.float32)
+      L2 = lattice[:, 1].astype(jnp.float32)
+
+      L1com = ellipticfunctions.to_cplx_divsqrt2(L1)
+      L2com = ellipticfunctions.to_cplx_divsqrt2(L2)
+      w1 = (L1com / 2.0).astype(jnp.complex64)
+      w2 = (L2com / 2.0).astype(jnp.complex64)
+      tau = (w2 / w1).astype(jnp.complex64)
+      pi_c = jnp.asarray(jnp.pi, jnp.float32).astype(jnp.complex64)
+
+      # Precompute θ₁ series coefficients once
+      theta_coeffs = ellipticfunctions._precompute_theta_coeffs(tau, max_terms=15)
+      t1p0, t1ppp0 = ellipticfunctions._theta_derivs0_from_coeffs(theta_coeffs)
+      c = - (pi_c * pi_c) / (24.0 * w1 * w1) * (t1ppp0 / t1p0)
+
+      # "almost" term, shared for both sectors
+      almost = ellipticfunctions.almost_modular(L1, L2, magfield_kwargs["N_phi"])
+
+      consts = {
+          'L1': L1,
+          'L2': L2,
+          'w1': w1,
+          'w2': w2,
+          'tau': tau,
+          'pi': pi_c,
+          'theta_coeffs': theta_coeffs,
+          't1p0': t1p0,
+          't1ppp0': t1ppp0,
+          'c': c,
+          'N_phi': jnp.asarray(N_phi, jnp.float32),
+          'almost': almost,
+      }
+
+      laughlin_consts = jax.tree.map(lambda x: jax.lax.stop_gradient(jnp.asarray(x)), consts)
+      COM_zeros = jnp.array([-L1com, 0.0+0.0j,L1com])
+      params, data.positions = pretrain.pretrain_laughlin(
+          params=params,
+          positions=data.positions,
+          spins=pretrain_spins,
+          atoms=data.atoms,
+          charges=data.charges,
+          batch_network=batch_network,        # returns complex log ψ_net
+          network_options=network.options,
+          sharded_key=subkeys,
+          electrons=cfg.system.electrons,
+          alpha=COM_zeros,
+          q=laughlin_q,
+          consts=laughlin_consts,
+          iterations=cfg.pretrain.iterations,
+          batch_size=device_batch_size,
+          laughlin_fraction=cfg.pretrain.get('laughlin_fraction', 1.0),
+          lambda_current=0.1,
+          # NEW:
+          mcmc_move_width=cfg.mcmc.move_width,
+          mcmc_adapt_frequency=cfg.mcmc.adapt_frequency,
+      )
+    
 
   # Main training
 
