@@ -742,12 +742,27 @@ def make_fermi_net_with_zero_projection_momind_0(
 
     Single-particle:  T(R) f(r) = exp(i r×R / 2) f(r+R),   (ℓ_B = 1)
     Many-body COM:    T_MB(R) Ψ({r_i}) = exp(i/2 Σ_i r_i×R) Ψ({r_i+R})
+    Single-particle:  T(R) f(r) = exp(i r×R / 2) f(r+R),   (ℓ_B = 1)
+    Many-body COM:    T_MB(R) Ψ({r_i}) = exp(i/2 Σ_i r_i×R) Ψ({r_i+R})
 
+  and a Bloch projector
   and a Bloch projector
 
     Ψ_k({r_i}) = Σ_R exp[-i k_eff·R] T_MB(R) Ψ({r_i}),
+    Ψ_k({r_i}) = Σ_R exp[-i k_eff·R] T_MB(R) Ψ({r_i}),
 
   where R runs over magnetic unit-cell translations inside the supercell
+  (COM translations), and
+
+    k_eff = k + Δk,
+
+  with k = m g1 + n g2 (discrete MBZ point) and Δk determined by the
+  boundary twists η_{L1}, η_{L2} via
+
+    T(L1) ψ = (η_{L1})^{Nφ} ψ,   T(L2) ψ = (η_{L2})^{Nφ} ψ,
+
+  ⇒ Δk = δ1 g1 + δ2 g2,
+     δ1 = Nφ θ_{L1}/(2π),  δ2 = Nφ θ_{L2}/(2π),  η_{Li} = e^{i θ_{Li}}.
   (COM translations), and
 
     k_eff = k + Δk,
@@ -764,11 +779,13 @@ def make_fermi_net_with_zero_projection_momind_0(
   if envelope is None:
     raise ValueError(
         "make_fermi_net_with_zero_projection_momind_0 expects an explicit "
+        "make_fermi_net_with_zero_projection_momind_0 expects an explicit "
         "PRE_DETERMINANT envelope."
     )
 
   if envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
     raise ValueError(
+        "Envelope for make_fermi_net_with_zero_projection_momind_0 must "
         "Envelope for make_fermi_net_with_zero_projection_momind_0 must "
         "be PRE_DETERMINANT."
     )

@@ -204,7 +204,7 @@ def make_zero_lattice(potential_lattice: np.ndarray,
 
     return zeros_cart, zeros_complex
 
-def get_config():
+def get_config(intstrength):
   # Get default options.
   cfg = base_config.default()
   cfg.system.electrons = (4, 0)
@@ -233,7 +233,7 @@ def get_config():
   pp_coffs = np .array([0.0, 0.0, 0.0])  
   pp_phases = np.array([0.0, 0.0, 0.0])
   #epsilon = 5.0
-  intcoff = 3.0
+  intcoff = int
   #print(epsilon)
   cfg.system.make_local_energy_fn = "ferminet.pbc.Hamiltonian_quantumHall.local_energy"
   cfg.system.make_local_energy_kwargs = {"lattice": lattice, "heg": True,"potential_kwargs": {"laplacian_method": "folx","interaction_energy_scale": intcoff},"kinetic_energy_kwargs": {"prefactor": KE_prefactor}, "periodic_lattice": potential_lattice,"periodic_potential_kwargs": {"coefficients": pp_coffs, "phases": pp_phases},"Bfield_lattice": potential_lattice,"Bfield_kwargs" : {"flux": -0.23,"threadedflux": np.array([0,0])}}
@@ -271,6 +271,7 @@ def get_config():
   cfg.initialization.randomize = False
   cfg.initialization.reset_t = True
   cfg.targetmom.mom = None
+  cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": jnp.array([a1,a2]), "logsumtrick": False,"magnetic_length": 1.0}
   #key = jax.random.PRNGKey(64)
   #complex_zeros = init_random_zeros(9, lattice[:,0], lattice[:,1], key)
   zeros_cart, zeros_complex = make_zero_lattice(potential_lattice, Tmatrix, z_scale=1.0)

@@ -29,7 +29,7 @@ import kfac_jax
 import numpy as np
 import optax
 import pyscf
-
+from ferminet import ellipticfunctions  
 
 def get_hf(molecule: Sequence[system.Atom] | None = None,
            nspins: Tuple[int, int] | None = None,
@@ -176,7 +176,7 @@ def make_pretrain_step(
       return (1 - scf_fraction) * log_ferminet + scf_fraction * log_scf
 
   mcmc_step = mcmc.make_mcmc_step(
-      mcmc_network, batch_per_device=batch_size, steps=1)
+      mcmc_network, batch_per_device=batch_size, steps=20)
 
   def loss_fn(
       params: networks.ParamTree,
@@ -347,156 +347,417 @@ def pretrain_hartree_fock(
   return params, data.positions
 
 
-# # In pretrain.py (or similar)
-
-# from typing import Callable, Tuple
-
-# import chex
-# import jax
-# import jax.numpy as jnp
-
-# from ferminet import constants
-# from ferminet import networks  # only for type hints, not strictly necessary
-
-# #ParamTree = networks.ParamTree  # for readability
+### Laughlin pretraining
 
 
-def pretrain_laughlin_vortexformer(
+def _laughlin_log_psi_single(
+    z_flat: jnp.ndarray,
+    laughlin_params: Mapping[str, jnp.ndarray],
+) -> jnp.ndarray:
+  """log Ψ_Laughlin(z_flat) for a single configuration (2*Ne,)."""
+  alpha  = laughlin_params['alpha']
+  q      = laughlin_params['q']
+  consts = laughlin_params['consts']
+  return ellipticfunctions.laughlin_log_psi_torus(z_flat, alpha, q, consts)
+
+
+_vmap_laughlin_log_psi = jax.vmap(
+    _laughlin_log_psi_single, in_axes=(0, None)
+)
+
+# ----- Phase gradients for Laughlin target -----
+
+def _laughlin_phase_grad_single(z_flat: jnp.ndarray,
+                                laughlin_params) -> jnp.ndarray:
+    """
+    ∇_{r_i} φ_L for a single configuration.
+    z_flat: shape (2*Ne,), real.
+    Returns: shape (Ne, 2), real.
+    """
+    def phi_fn(z_flat_in):
+        # log ψ_L is complex; its imaginary part is the phase φ_L
+        logpsi_L = _laughlin_log_psi_single(z_flat_in, laughlin_params)
+        return jnp.imag(logpsi_L)
+
+    grad_phi_flat = jax.grad(phi_fn)(z_flat)            # (2*Ne,)
+    dim = 2
+    nelec = z_flat.shape[0] // dim
+    return grad_phi_flat.reshape((nelec, dim))          # (Ne, 2)
+
+
+_vmap_laughlin_phase_grad = jax.vmap(
+    _laughlin_phase_grad_single, in_axes=(0, None)
+)
+
+
+# ----- Phase gradients for neural-network wavefunction -----
+
+def _network_phase_grad_single(z_flat: jnp.ndarray,
+                               spin_single: jnp.ndarray,
+                               params,
+                               batch_network,
+                               atoms0: jnp.ndarray,
+                               charges0: jnp.ndarray) -> jnp.ndarray:
+    """
+    ∇_{r_i} φ_NN for a single configuration.
+    z_flat: shape (2*Ne,), real.
+    spin_single: shape (Ne,)
+    atoms0, charges0: unbatched (single copy) used for this config.
+    Returns: shape (Ne, 2), real.
+    """
+    def phi_fn(z_flat_in):
+        pos_in   = z_flat_in[None, :]        # (1, 2*Ne)
+        spins_in = spin_single[None, :]      # (1, Ne)
+        # logψ_net is complex: log|ψ| + i φ_NN
+        logpsi_net = batch_network(params, pos_in, spins_in, atoms0, charges0)[0]
+        return jnp.imag(logpsi_net)
+
+    grad_phi_flat = jax.grad(phi_fn)(z_flat)           # (2*Ne,)
+    dim = 2
+    nelec = z_flat.shape[0] // dim
+    return grad_phi_flat.reshape((nelec, dim))         # (Ne, 2)
+
+
+def network_phase_grads_batch(params,
+                              batch_network,
+                              pos: jnp.ndarray,
+                              spins: jnp.ndarray,
+                              atoms: jnp.ndarray,
+                              charges: jnp.ndarray) -> jnp.ndarray:
+    """
+    Batched phase gradients for NN:
+      pos.shape    = (batch, 2*Ne)
+      spins.shape  = (batch, Ne)
+      atoms.shape  = (1, natoms, 3) or (batch, ...)
+      charges.shape= (1, natoms) or (batch, ...)
+    Returns: shape (batch, Ne, 2)
+    """
+    # Use a single copy of atoms/charges if they are batched,
+    # just like in HF pretrain.
+    atoms0   = atoms[0:1]
+    charges0 = charges[0:1]
+
+    def _single(z_flat, s_single):
+        return _network_phase_grad_single(
+            z_flat, s_single, params, batch_network, atoms0, charges0
+        )
+
+    return jax.vmap(_single, in_axes=(0, 0))(pos, spins)   # (batch, Ne, 2)
+
+def laughlin_density_current_loss(
+    params,
+    batch_network,
+    pos: jnp.ndarray,        # (batch, 2*Ne)
+    spins: jnp.ndarray,      # (batch, Ne)
+    atoms: jnp.ndarray,
+    charges: jnp.ndarray,
+    laughlin_params,
+    lambda_phase: float = 1.0,
+) -> jnp.ndarray:
+    """
+    Implements Eqs. (2)-(4) of Nazaryan et al.:
+        L = ⟨ [log ρ_N - log ρ_L]^2 ⟩_{MC} + λ_J ⟨ Σ_i |∇_{r_i} φ_N - ∇_{r_i} φ_L|^2 ⟩_{MC}
+
+    Here the Monte Carlo average is over the current sample set.
+    """
+
+    # ---------- 1. log-densities (for Eq. (2)) ----------
+    # log ψ_NN and log ψ_L (complex)
+    logpsi_net = batch_network(params, pos, spins, atoms, charges)      # (batch,)
+    logpsi_L   = _vmap_laughlin_log_psi(pos, laughlin_params)          # (batch,)
+
+    # log ρ = 2 Re log ψ
+    logrho_net = 2.0 * jnp.real(logpsi_net)
+    logrho_L   = 2.0 * jnp.real(logpsi_L)
+
+    # small epsilon to avoid log(0) issues if you ever re-log these;
+    # for Eq. (2) we just use the difference directly:
+    diff_logrho = logrho_net - logrho_L
+    density_loss = jnp.mean(diff_logrho**2)
+
+    # ---------- 2. current / phase-gradient term (Eq. (3)) ----------
+    if lambda_phase != 0.0:
+        # ∇ φ_L and ∇ φ_NN, shapes (batch, Ne, 2)
+        gradphi_L   = _vmap_laughlin_phase_grad(pos, laughlin_params)
+        gradphi_net = network_phase_grads_batch(
+            params, batch_network, pos, spins, atoms, charges
+        )
+
+        # difference of gradients, squared norm summed over electrons and dims
+        grad_diff = gradphi_net - gradphi_L                  # (batch, Ne, 2)
+        grad_diff_sq = jnp.sum(grad_diff**2, axis=(1, 2))    # (batch,)
+
+        # optional safety against numerical explosions:
+        grad_diff_sq = jnp.nan_to_num(grad_diff_sq, posinf=1e6, neginf=1e6)
+
+        current_loss = jnp.mean(grad_diff_sq)
+    else:
+        current_loss = 0.0
+
+    # ---------- 3. Total loss (Eq. (4)) ----------
+    total_loss = density_loss + lambda_phase * current_loss
+    return total_loss
+
+
+def laughlin_density_only_loss(
+    params,
+    data,
+    batch_network,
+    laughlin_params,
+):
+  """NaN-safe density-matching loss between network and Laughlin.
+
+  L = ⟨ [ (log ρ_net - log ρ_L) - mean ]^2 ⟩ over valid configs.
+  """
+  pos     = data.positions   # (batch, 2*Ne)
+  spins   = data.spins
+  atoms   = data.atoms
+  charges = data.charges
+
+  # Complex log ψ for network and Laughlin
+  log_psi_net = batch_network(params, pos, spins, atoms, charges)    # (batch,)
+  log_psi_L   = _vmap_laughlin_log_psi(pos, laughlin_params)         # (batch,)
+
+  # 1) Sanitize NaN / ±∞ first (both real and imag parts)
+  log_psi_net = jnp.nan_to_num(log_psi_net,
+                               nan=0.0,
+                               posinf=1e4,
+                               neginf=-1e4)
+  log_psi_L   = jnp.nan_to_num(log_psi_L,
+                               nan=0.0,
+                               posinf=1e4,
+                               neginf=-1e4)
+
+  # 2) log ρ = 2 Re(log ψ); we only care about Re part for density
+  log_rho_net = 2.0 * jnp.real(log_psi_net)
+  log_rho_L   = 2.0 * jnp.real(log_psi_L)
+
+  # 3) Build a validity mask: both sides must be finite
+  finite_net = jnp.isfinite(log_rho_net)
+  finite_L   = jnp.isfinite(log_rho_L)
+  mask_bool  = jnp.logical_and(finite_net, finite_L)     # (batch,)
+  mask       = mask_bool.astype(jnp.float32)             # (batch,)
+
+  # Make sure we don't divide by zero later
+  valid_count = jnp.sum(mask) + 1e-8
+
+  # 4) Difference in log-density
+  delta = log_rho_net - log_rho_L          # (batch,)
+
+  # Optionally clip extreme values (prevents overflow when squaring)
+  delta = jnp.clip(delta, -50.0, 50.0)
+
+  # 5) Apply mask WITHOUT boolean indexing (JAX-safe)
+  delta_masked = delta * mask              # invalid entries set to 0
+
+  # 6) Subtract mean difference over valid configs (remove global offset)
+  mean_delta = jnp.sum(delta_masked) / valid_count
+  delta_centered = (delta - mean_delta) * mask  # still zeros where mask=0
+
+  # 7) Mean squared error over valid configs
+  sq = delta_centered * delta_centered
+  loss = jnp.sum(sq) / valid_count
+
+  # Final NaN/inf guard (just in case)
+  loss = jnp.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
+
+  return loss
+
+def make_laughlin_pretrain_step(
+    batch_network: networks.FermiNetLike,   # returns complex log ψ_net
+    optimizer_update: optax.TransformUpdateFn,
+    electrons: Tuple[int, int],
+    batch_size: int = 0,
+    laughlin_fraction: float = 1.0,
+    lambda_current: float = 0.1,
+    laughlin_params: Mapping[str, jnp.ndarray] | None = None,
+):
+  """Creates function for performing one step of Laughlin pretraining.
+
+  Args:
+    batch_network: f(params, pos, spins, atoms, charges) -> complex log ψ_net.
+    optimizer_update: optax-style update function.
+    electrons: (n_up, n_down), kept for API symmetry (unused here).
+    batch_size: walkers per device for MCMC.
+    laughlin_fraction: fraction of sampling log-prob from Laughlin vs NN.
+    laughlin_params: dict with keys 'alpha', 'q', 'consts' for Laughlin state.
+  """
+  if laughlin_params is None:
+    raise ValueError('laughlin_params must be provided.')
+
+  if laughlin_fraction < 0.0 or laughlin_fraction > 1.0:
+    raise ValueError('laughlin_fraction must be in [0, 1].')
+
+  # --- MCMC log-probability (uses only Re[log ψ]) ---
+
+  if laughlin_fraction < 1e-6:
+    # Pure NN sampling.
+    def mcmc_network(full_params, pos, spins, atoms, charges):
+      logpsi_net = batch_network(full_params['ferminet'], pos, spins,
+                                 atoms, charges)
+      return jnp.real(logpsi_net)
+
+  elif laughlin_fraction > 0.999999:
+    # Pure Laughlin sampling.
+    def mcmc_network(full_params, pos, spins, atoms, charges):
+      del spins, atoms, charges, full_params
+      logpsi_L = _vmap_laughlin_log_psi(pos, laughlin_params)
+      return jnp.real(logpsi_L)
+
+  else:
+    # Mixture in log-space for sampling.
+    def mcmc_network(full_params, pos, spins, atoms, charges):
+      logpsi_net = batch_network(full_params['ferminet'], pos, spins,
+                                 atoms, charges)
+      logpsi_L   = _vmap_laughlin_log_psi(pos, laughlin_params)
+      logp_net = jnp.real(logpsi_net)
+      logp_L   = jnp.real(logpsi_L)
+      return (1.0 - laughlin_fraction) * logp_net + laughlin_fraction * logp_L
+
+  # Same as before, but we will now pass a *variable* width.
+  mcmc_step = mcmc.make_mcmc_step(
+      mcmc_network, batch_per_device=batch_size, steps=20
+  )
+
+  def loss_fn(params, data, laughlin_params):
+    pos   = data.positions      # (batch, 2*Ne)
+    spins = data.spins          # (batch, Ne)
+    atoms = data.atoms
+    charges = data.charges
+
+    loss = laughlin_density_current_loss(
+        params,
+        batch_network,
+        pos,
+        spins,
+        atoms,
+        charges,
+        laughlin_params,
+        lambda_phase=1.0,
+    )
+    return constants.pmean(loss)
+
+  def pretrain_step(
+      data: networks.FermiNetData,
+      params: networks.ParamTree,
+      state,
+      key: chex.PRNGKey,
+      mcmc_width: jnp.ndarray,   # <--- NEW ARG: per-device width
+  ):
+    """One iteration of Laughlin pretraining (amplitude + phase)."""
+    val_and_grad = jax.value_and_grad(loss_fn, argnums=0)
+    loss_val, grad = val_and_grad(params, data, laughlin_params)
+    grad = constants.pmean(grad)
+
+    updates, state = optimizer_update(grad, state, params)
+    params = optax.apply_updates(params, updates)
+
+    # Parameters seen by MCMC network.
+    full_params = {'ferminet': params}
+
+    # Refresh configs with one MCMC sweep using current width.
+    data, pmove = mcmc_step(full_params, data, key, width=mcmc_width)
+
+    return data, params, state, loss_val, pmove
+
+  return pretrain_step
+
+def pretrain_laughlin(
+    *,
     params: networks.ParamTree,
     positions: jnp.ndarray,
-    *,
     spins: jnp.ndarray,
     atoms: jnp.ndarray,
     charges: jnp.ndarray,
-    batch_signed_network: Callable[[networks.ParamTree, jnp.ndarray, jnp.ndarray,
-                                    jnp.ndarray, jnp.ndarray],
-                                   Tuple[jnp.ndarray, jnp.ndarray]],
-    laughlin_log_psi_fn: Callable[[jnp.ndarray], jnp.complexfloating],
-    iterations: int = 200,
-    learning_rate: float = 1e-3,
-) -> Tuple[networks.ParamTree, jnp.ndarray]:
-  """
-  Pretrain a vortexformer (envelope-only zero-projection) network by maximizing
-  the squared overlap with a reference Laughlin wavefunction.
-
-  Args:
-    params: Sharded network parameters (replicated on each device).
-    positions: Electron configurations with leading device axis.
-               Shape: (n_devices, batch_size, nelec * ndim).
-    spins: Spins, same leading axes as positions.
-           Shape: (n_devices, batch_size, nelec).
-    atoms: Atomic positions, typically broadcast over devices.
-           Shape: (n_devices, natoms, ndim) or (natoms, ndim) if broadcasting.
-    charges: Atomic charges, shape (n_devices, natoms) or (natoms,) if broadcasting.
-    batch_signed_network: vmapped network.apply over walkers,
-        signature:
-          (params, pos, spins, atoms, charges) -> (phase, logabs),
-        where phase and logabs are arrays of shape (batch_size,).
-        For complex_output=True, phase is the phase angle and logabs is log|ψ|.
-    laughlin_log_psi_fn: function that takes a single flattened position
-        (nelec*ndim,) and returns complex log amplitude log Ψ_L (on the torus).
-        We'll vmap this inside over the batch dimension.
-    iterations: Number of gradient descent steps for pretraining.
-    learning_rate: Pretraining learning rate (plain SGD).
+    batch_network: networks.FermiNetLike,      # returns complex log ψ_net
+    network_options: networks.BaseNetworkOptions,
+    sharded_key: chex.PRNGKey,
+    electrons: Tuple[int, int],
+    alpha: jnp.ndarray,
+    q: int,
+    consts: Mapping[str, jnp.ndarray],
+    iterations: int = 1000,
+    batch_size: int = 0,
+    logger: Callable[[int, float], None] | None = None,
+    laughlin_fraction: float = 1.0,
+    lambda_current: float = 1.0,
+    # NEW: adaptive MCMC controls
+    mcmc_move_width: float = 0.02,
+    mcmc_adapt_frequency: int = 50,
+):
+  """Pretrain network to match Laughlin (amplitude + phase).
 
   Returns:
-    (new_params, overlaps), where:
-      new_params: pretrained parameters (same sharding as input).
-      overlaps: 1D array of shape (iterations,) on host with the estimated
-                squared overlap after each iteration (host-side, not sharded).
+    (params, positions): updated network params and MCMC configurations.
   """
+  # Pack Laughlin state info into one object.
+  laughlin_params = {
+      'alpha': alpha,
+      'q': jnp.asarray(q),
+      'consts': consts,
+  }
 
-  axis_name = constants.PMAP_AXIS_NAME
+  optimizer = optax.adam(1.0e-5)
+  opt_state_pt = constants.pmap(optimizer.init)(params)
 
-  # Make sure atoms/charges are shaped with leading device axis, if needed.
-  # If they are unsharded (shape (natoms, ndim)), pmap will broadcast them.
-  # So we don't touch them here.
+  pretrain_step = make_laughlin_pretrain_step(
+      batch_network=batch_network,
+      optimizer_update=optimizer.update,
+      electrons=electrons,
+      batch_size=batch_size,
+      laughlin_fraction=laughlin_fraction,
+      laughlin_params=laughlin_params,
+  )
+  pretrain_step = constants.pmap(pretrain_step)
 
-  # Vectorized Laughlin log-psi over walkers.
-  @jax.jit
-  def _batch_laughlin_log_psi(pos_batch: jnp.ndarray) -> jnp.ndarray:
-    # pos_batch: (batch_size, nelec*ndim)
-    return jax.vmap(laughlin_log_psi_fn, in_axes=0, out_axes=0)(pos_batch)
+  # Spin broadcasting as in HF pretrain.
+  pretrain_spins = spins  # you pass spins[0,0] from train()
+  batch_spins = jnp.tile(pretrain_spins[None], [positions.shape[1], 1])
+  pmap_spins = kfac_jax.utils.replicate_all_local_devices(batch_spins)
 
-  # One pmapped update step.
-  @jax.pmap(axis_name=axis_name)
-  def _pretrain_step(
-      params_shard: networks.ParamTree,
-      pos_shard: jnp.ndarray,
-      spins_shard: jnp.ndarray,
-      atoms_shard: jnp.ndarray,
-      charges_shard: jnp.ndarray,
-  ):
-    """
-    One gradient step on -overlap^2. Runs independently on each device, then
-    averages gradients and overlap across devices using pmean/psum.
-    """
+  data = networks.FermiNetData(
+      positions=positions,
+      spins=pmap_spins,
+      atoms=atoms,
+      charges=charges,
+  )
 
-    def loss_fn(p: networks.ParamTree):
-      # Network log-psi (complex) for this shard's batch.
-      phase, logabs = batch_signed_network(
-          p, pos_shard, spins_shard, atoms_shard, charges_shard
-      )  # each (batch_size,)
-      log_psi_net = logabs + 1j * phase
+  # ---------- Adaptive MCMC width state (host) ----------
+  # scalar width → replicate to devices
+  mcmc_width_scalar = float(mcmc_move_width)
+  mcmc_width = kfac_jax.utils.replicate_all_local_devices(
+      jnp.asarray(mcmc_width_scalar, dtype=jnp.float32)
+  )
+  pmoves = np.zeros(mcmc_adapt_frequency, dtype=np.float32)
 
-      # Laughlin log-psi (complex) for the same batch.
-      log_psi_laughlin = _batch_laughlin_log_psi(pos_shard)  # (batch_size,)
-
-      # Ratio in log space.
-      delta = log_psi_net - log_psi_laughlin  # complex array, shape (batch_size,)
-
-      # Real shift for numerical stability (doesn't change overlap^2).
-      shift = jnp.max(jnp.real(delta))
-      delta_shifted = delta - shift
-
-      rho = jnp.exp(delta_shifted)  # shape (batch_size,)
-
-      # Local sums (to be globally reduced).
-      num_local = jnp.sum(rho)                # complex
-      den_local = jnp.sum(jnp.abs(rho)**2)    # real
-      count_local = rho.shape[0]              # int
-
-      # Global sums across devices.
-      num_global = jax.lax.psum(num_local, axis_name=axis_name)
-      den_global = jax.lax.psum(den_local, axis_name=axis_name)
-      count_global = jax.lax.psum(count_local, axis_name=axis_name)
-
-      # Global means.
-      count_global = count_global.astype(delta_shifted.dtype.real_dtype)
-      mean_rho = num_global / count_global
-      mean_rho2 = den_global / count_global
-
-      # Estimated squared overlap.
-      overlap_sq = (jnp.abs(mean_rho)**2) / (mean_rho2 + 1e-12)
-
-      # We want to maximize overlap_sq -> minimize -overlap_sq.
-      loss = -overlap_sq
-
-      return loss, overlap_sq
-
-    (loss, overlap_sq), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_shard)
-
-    # Average grads & metrics across devices.
-    grads = jax.lax.pmean(grads, axis_name=axis_name)
-    loss = jax.lax.pmean(loss, axis_name=axis_name)
-    overlap_sq = jax.lax.pmean(overlap_sq, axis_name=axis_name)
-
-    # Simple SGD update.
-    new_params_shard = jax.tree_map(
-        lambda p, g: p - learning_rate * g, params_shard, grads
+  for t in range(iterations):
+    sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+    # Note: pass mcmc_width into the pmapped step
+    data, params, opt_state_pt, loss, pmove = pretrain_step(
+        data, params, opt_state_pt, subkeys, mcmc_width
     )
 
-    return new_params_shard, loss, overlap_sq
+    # pmove and loss are replicated across devices: take first one on host.
+    loss_host = float(loss[0])
+    pmove_host = float(pmove[0])
 
-  # Host-side loop: track overlaps.
-  overlaps_host = []
-
-  cur_params = params
-  for it in range(iterations):
-    cur_params, loss_shard, overlap_shard = _pretrain_step(
-        cur_params, positions, spins, atoms, charges
+    # ----- Adapt MCMC move width on host, then re-broadcast -----
+    mcmc_width_scalar, pmoves = mcmc.update_mcmc_width(
+        t,
+        mcmc_width_scalar,
+        mcmc_adapt_frequency,
+        pmove_host,
+        pmoves,
     )
-    # Grab scalar from one device (they're all equal after pmean).
-    overlaps_host.append(jax.device_get(overlap_shard[0]))
+    mcmc_width = kfac_jax.utils.replicate_all_local_devices(
+        jnp.asarray(mcmc_width_scalar, dtype=jnp.float32)
+    )
 
-  return cur_params, jnp.array(overlaps_host)
+    logging.info(
+        'Laughlin pretrain iter %05d: loss=%g pmove=%g width=%g',
+        t, loss_host, pmove_host, mcmc_width_scalar
+    )
+    if logger:
+      logger(t, loss_host)
+
+  return params, data.positions

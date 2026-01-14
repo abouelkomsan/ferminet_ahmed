@@ -711,7 +711,9 @@ def update_mcmc_width(
 
   t_since_mcmc_update = t % adapt_frequency
   # update `pmoves`; `pmove` should be the same across devices
-  pmoves[t_since_mcmc_update] = pmove.reshape(-1)[0].item()
+  #pmoves[t_since_mcmc_update] = pmove.reshape(-1)[0].item()
+  pmove_scalar = np.asarray(pmove).reshape(-1)[0].item()
+  pmoves[t_since_mcmc_update] = pmove_scalar
   if t > 0 and t_since_mcmc_update == 0:
     if np.mean(pmoves) > pmove_max:
       width *= 1.1

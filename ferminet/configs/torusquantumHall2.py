@@ -211,7 +211,7 @@ def make_zero_lattice(potential_lattice: np.ndarray,
 def get_config(intstrength):
   # Get default options.
   cfg = base_config.default()
-  cfg.system.electrons = (12, 0)
+  cfg.system.electrons = (4, 0)
   cfg.system.ndim = 2
   # A ghost atom at the origin defines one-electron coordinate system.
   # Element 'X' is a dummy nucleus with zero charge
@@ -278,7 +278,7 @@ def get_config(intstrength):
   #complex_zeros = init_random_zeros(9, lattice[:,0], lattice[:,1], key)
   zeros_cart, zeros_complex = make_zero_lattice(potential_lattice, Tmatrix, z_scale=1.0)
   zeros_complex = zeros_complex - zeros_complex.mean()
-  cfg.network.psiformer_magfield.kwargs = {"lattice": lattice, "N_phi": np.array(36.0),"zeros": jnp.asarray(zeros_complex, jnp.complex64),"rescale": np.array(1.0),"N_holo": 36, "N_anti": 0,"bf_strength_init" : 0.01}
+  cfg.network.psiformer_magfield.kwargs = {"lattice": lattice, "N_phi": np.array(27.0),"zeros": jnp.asarray(zeros_complex, jnp.complex64),"rescale": np.array(1.0),"N_holo": 27, "N_anti": 0,"bf_strength_init" : 0.01}
   #cfg.targetmom.kwargs = {"abs_lattice": Tmatrix, "unit_cell_vectors": np.array([a1,a2]), "logsumtrick": True}
   #cfg.initialization.modifications = ['orbital-rnd']
   #cfg.log.save_path = 'ferminet_2025_09_08_15:31:46'

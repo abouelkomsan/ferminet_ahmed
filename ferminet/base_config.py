@@ -351,6 +351,7 @@ def default() -> ml_collections.ConfigDict:
           # 'random' is necessary for some systems, especially double
           # excitations.
           'excitation_type': 'ordered',
+          "laughlin_fraction": 1.0,
       },
   })
 
