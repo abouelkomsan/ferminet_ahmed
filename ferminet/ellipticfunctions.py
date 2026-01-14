@@ -869,7 +869,7 @@ def _reduce_u_and_z(u, tau, w1):
 
 # ---------- precompute θ-coefficients for fixed τ ----------
 
-def _precompute_theta_coeffs(tau, max_terms=30):
+def _precompute_theta_coeffs(tau, max_terms=50):
   """Precompute θ₁ series coefficients and derivative coefficients for fixed τ."""
   tau = jnp.asarray(tau, jnp.complex64)
   q   = _xcispi(tau)
@@ -1070,6 +1070,133 @@ def _LLL_with_zeros_log_cached(z, zeros, consts) -> jnp.ndarray:
 
   return (log_sig + log_gauge + log_gauss + log_quad).astype(jnp.complex64)
 
+# --- theta' from cached coeffs: θ1'(u) = Σ coeff_series * k * cos(k u)
+def _theta1_prime_from_coeffs(u, theta_coeffs):
+  u = u.astype(jnp.complex64)
+  k  = theta_coeffs['k'].astype(jnp.complex64)      # (T,)
+  cs = theta_coeffs['coeff_series']                 # (T,)
+  cos_ku = jnp.cos(k * u)
+  return jnp.sum(cs * k * cos_ku)
+
+# --- reduction that also returns the winding integer n (needed for d/dz log_fac_theta)
+def _reduce_u_and_z_with_n(u, tau, w1):
+  pi_f = jnp.asarray(jnp.pi, jnp.float32)
+  u   = u.astype(jnp.complex64)
+  tau = tau.astype(jnp.complex64)
+  w1  = w1.astype(jnp.complex64)
+
+  n = round_sg(jnp.imag(u) / (pi_f * jnp.imag(tau)))    # real scalar
+  u1 = u - n.astype(jnp.complex64) * pi_f.astype(jnp.complex64) * tau
+  m = round_sg(jnp.real(u1) / pi_f)
+  u_red = u1 - m.astype(jnp.complex64) * pi_f.astype(jnp.complex64)
+
+  z_red = (2.0 * w1 / pi_f.astype(jnp.complex64)) * u_red
+
+  log_fac_theta = (
+      1j * pi_f.astype(jnp.complex64) * (m + n).astype(jnp.complex64)
+      - 1j * (2.0 * n.astype(jnp.complex64) * u_red
+              + (n.astype(jnp.complex64) ** 2) * pi_f.astype(jnp.complex64) * tau)
+  )
+  return u_red, z_red, log_fac_theta, n
+
+# --- ∂_z log σ(z | w1,w2) in the SAME reduced-strip convention as _log_weierstrass_sigma_cached
+def _dlog_weierstrass_sigma_dz_cached(z: jnp.ndarray,
+                                      consts: Mapping[str, jnp.ndarray],
+                                      small_u_thresh: float = 1e-6) -> jnp.ndarray:
+  w1   = consts['w1']          # complex64
+  tau  = consts['tau']         # complex64
+  pi_c = consts['pi']          # complex64
+  c    = consts['c']           # complex64
+  theta_coeffs = consts['theta_coeffs']
+
+  z = z.astype(jnp.complex64)
+
+  # u = π z / (2 w1)
+  u = pi_c * z / (2.0 * w1)
+
+  # reduce u, and get the winding integer n used in the exact θ-shift factor
+  u_red, _, _, n = _reduce_u_and_z_with_n(u, tau, w1)
+
+  # du/dz = π/(2 w1)
+  du_dz = pi_c / (2.0 * w1)
+
+  # θ1(u_red), θ1'(u_red)
+  theta  = _theta1_series_from_coeffs(u_red, theta_coeffs)
+  theta_p = _theta1_prime_from_coeffs(u_red, theta_coeffs)
+
+  # ratio θ1'(u)/θ1(u), with small-u guard (θ1 ~ t1p0*u => ratio ~ 1/u)
+  eps = jnp.asarray(1e-30, jnp.float32).astype(jnp.complex64)
+  ratio_small   = 1.0 / (u_red + eps)
+  ratio_generic = theta_p / (theta + eps)
+  ratio = jnp.where(jnp.abs(u_red) < small_u_thresh, ratio_small, ratio_generic)
+
+  # d/dz log θ1(u_red) = (θ'/θ) * du/dz
+  dlog_theta = ratio * du_dz
+
+  # d/dz log_fac_theta = - i * 2 n * du/dz   (since m,n are constants under stop_gradient)
+  dlog_fac_theta = (-1j) * (2.0 * n.astype(jnp.complex64)) * du_dz
+
+  # c-terms simplify exactly to 2 c z (independent of reduction)
+  dlog_c = 2.0 * c * z
+
+  return (dlog_theta + dlog_fac_theta + dlog_c).astype(jnp.complex64)
+
+# --- ∂_z log ψ_LLL(z) for your _LLL_with_zeros_log_cached
+def _dlog_LLL_dz_cached(z, zeros, consts) -> jnp.ndarray:
+  z_c = z.astype(jnp.complex64)
+  zeros_c = jnp.asarray(zeros, jnp.complex64)
+  nz = zeros_c.size
+
+  # Σ_a ∂_z log σ(z-a)
+  dlog_sig = jnp.sum(jnp.array(
+      [_dlog_weierstrass_sigma_dz_cached(z_c - a, consts) for a in zeros_c],
+      dtype=jnp.complex64
+  ))
+
+  # other terms (from your log ψ definition)
+  A = jnp.sum(zeros_c).astype(jnp.complex64)
+  Nphi_f = jnp.asarray(consts['N_phi'], jnp.float32)
+  Nphi_c = Nphi_f.astype(jnp.complex64)
+  almost = consts['almost'].astype(jnp.complex64)
+
+  # ∂_z [ (conj(A) z - conj(z) A)/(2Nphi) ] = conj(A)/(2Nphi)
+  dlog_gauge = jnp.conj(A) / (2.0 * Nphi_c)
+
+  # ∂_z [ -nz |z|^2/(2Nphi) ] = -nz * conj(z)/(2Nphi)
+  dlog_gauss = - jnp.asarray(nz, jnp.float32).astype(jnp.complex64) * jnp.conj(z_c) / (2.0 * Nphi_c)
+
+  # ∂_z [ -0.5 nz * almost * z^2 ] = -nz * almost * z
+  dlog_quad = - jnp.asarray(nz, jnp.float32).astype(jnp.complex64) * almost * z_c
+
+  return (dlog_sig + dlog_gauge + dlog_gauss + dlog_quad).astype(jnp.complex64)
+
+# --- 1LL log-wavefunction in the same style
+def _1LL_with_zeros_log_cached(z, zeros, consts,
+                               small_u_thresh: float = 1e-6,
+                               lo: float = -80.0,
+                               hi: float = 80.0) -> jnp.ndarray:
+  """
+  1LL via raising operator (symmetric gauge, l_B=1 convention):
+      ψ1(z) ∝ (1/√2) (conj(z) - 2 ∂_z) ψ0(z)
+
+  Returns complex64 log ψ1 (principal branch). Uses eps to avoid log(0).
+  """
+  z_c = z.astype(jnp.complex64)
+
+  log_psi0 = _LLL_with_zeros_log_cached(z_c, zeros, consts)
+  dlog0    = _dlog_LLL_dz_cached(z_c, zeros, consts)
+
+  pref = (jnp.conj(z_c) - 2.0 * dlog0) / jnp.sqrt(jnp.asarray(2.0, jnp.float32))
+  eps_pref = jnp.asarray(1e-30, jnp.float32).astype(jnp.complex64)
+
+  log_psi1 = log_psi0 + jnp.log(pref + eps_pref)
+
+  # optional stability clamp on Re(log ψ)
+  re = jnp.clip(jnp.real(log_psi1),
+                a_min=jnp.asarray(lo, jnp.float32),
+                a_max=jnp.asarray(hi, jnp.float32))
+  log_psi1 = (re.astype(jnp.float32) + 1j * jnp.imag(log_psi1).astype(jnp.float32)).astype(jnp.complex64)
+  return log_psi1
 
 # def make_laughlin_log_psi_fn(
 #     *,

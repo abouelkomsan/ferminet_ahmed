@@ -319,9 +319,12 @@ def default() -> ml_collections.ConfigDict:
         'flatten_num_devices': False,
         'ignore_batch': False, 
         'randomize': True,
+        'reset_t': False,
       },
       'targetmom': {
         'mom': None, #None or integer
+        'mom1': None, #None or integer
+        'mom2': None, #None or integer
         'kwargs': {}, #keywords for lattice and vectors
       },
       'observables': {

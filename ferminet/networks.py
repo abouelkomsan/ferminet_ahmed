@@ -2008,6 +2008,227 @@ def make_orbitals_envelope_only_zero_projection(
     return orbitals
 
   return init, apply
+
+def make_orbitals_with_zero_projection_pooled(
+    nspins: Tuple[int, int],
+    charges: jnp.ndarray,
+    options: BaseNetworkOptions,
+    equivariant_layers: Tuple[InitLayersFn, ApplyLayersFn],
+    N_holo: int,
+) -> Tuple[InitLayersFn, ApplyLayersFn]:
+  """
+  Same as make_orbitals_with_zero_projection, but the zeros are predicted from a
+  *pooled* (per-spin) summary of the final equivariant features, instead of
+  flattening all electrons.
+
+  Pooling used here: mean over the electron axis for each spin channel.
+  """
+
+  equivariant_layers_init, equivariant_layers_apply = equivariant_layers
+
+  jastrow_init, jastrow_apply = jastrows.get_jastrow(
+      options.jastrow, options.jastrow_kwargs
+  )
+
+  if options.pbc_lattice is not None:
+    construct_input_features_internal = make_periodic_construct_input_features(
+        options.pbc_lattice
+    )
+  else:
+    construct_input_features_internal = construct_input_features
+
+  def init(key: chex.PRNGKey) -> ParamTree:
+    if options.envelope.apply_type != envelopes.EnvelopeType.PRE_DETERMINANT:
+      raise ValueError(
+          "make_orbitals_with_zero_projection_pooled expects a PRE_DETERMINANT "
+          "envelope (e.g. LLL envelope)."
+      )
+
+    key, subkey = jax.random.split(key)
+    params = {}
+    dims_orbital_in, params['layers'] = equivariant_layers_init(subkey)
+
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    if len(active_spin_channels) == 0:
+      raise ValueError('No electrons present!')
+
+    # orbital output sizes (same logic as your original)
+    nspin_orbitals_real = []
+    num_states = max(options.states, 1)
+    for nspin in active_spin_channels:
+      if options.full_det:
+        norbitals = sum(nspins) * options.determinants * num_states
+      else:
+        norbitals = nspin * options.determinants * num_states
+      if options.complex_output:
+        norbitals *= 2
+      nspin_orbitals_real.append(norbitals)
+
+    # envelope init (template)
+    natom = charges.shape[0]
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      raise ValueError(
+          "make_orbitals_with_zero_projection_pooled only supports PRE_DETERMINANT."
+      )
+    elif options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      output_dims = [norbitals // 2 for norbitals in nspin_orbitals_real] \
+          if options.complex_output else nspin_orbitals_real
+    else:
+      raise ValueError('Unknown envelope type')
+
+    params['envelope'] = options.envelope.init(
+        natom=natom, output_dims=output_dims, ndim=options.ndim
+    )
+
+    # sanity-check zeros template + infer nenv_orb per spin
+    nenv_orbitals_per_spin = []
+    for i, odim in enumerate(output_dims):
+      env_i = params['envelope'][i]
+      zeros_template = env_i.get('zeros_holo_unconstrained', None)
+      if zeros_template is None or zeros_template.size == 0:
+        raise ValueError(
+            "Envelope template missing non-empty 'zeros_holo_unconstrained'."
+        )
+      rows, nenv_orb = zeros_template.shape
+      if rows != 2 * N_holo:
+        raise ValueError(
+            f"Envelope template rows={rows}, expected 2*N_holo={2*N_holo}."
+        )
+      if nenv_orb != odim:
+        raise ValueError(
+            f"Envelope template odim={nenv_orb} != output_dims[{i}]={odim}."
+        )
+      nenv_orbitals_per_spin.append(nenv_orb)
+
+    # Jastrow params
+    if jastrow_init is not None:
+      params['jastrow'] = jastrow_init()
+
+    # orbital linear heads (unchanged)
+    orbitals = []
+    key_orb = key
+    for nspin_orb_real in nspin_orbitals_real:
+      key_orb, subkey = jax.random.split(key_orb)
+      orbitals.append(
+          network_blocks.init_linear_layer(
+              subkey,
+              in_dim=dims_orbital_in,
+              out_dim=nspin_orb_real,
+              include_bias=options.bias_orbitals,
+          )
+      )
+    params['orbital'] = orbitals
+
+    # --- NEW: pooled zero-heads ---
+    # input dim is now just dims_orbital_in (not multiplied by nspin_elec)
+    zero_heads = []
+    key_zero = key_orb
+    for nenv_orb in nenv_orbitals_per_spin:
+      key_zero, subkey = jax.random.split(key_zero)
+      zero_out_dim = 2 * N_holo * nenv_orb
+      zero_heads.append(
+          network_blocks.init_linear_layer(
+              subkey,
+              in_dim=dims_orbital_in,
+              out_dim=zero_out_dim,
+              include_bias=False,
+          )
+      )
+    params['zero_head'] = zero_heads
+
+    return params
+
+  def apply(params, pos, spins, atoms, charges) -> Sequence[jnp.ndarray]:
+    ae, ee, r_ae, r_ee = construct_input_features_internal(
+        pos, atoms, ndim=options.ndim
+    )
+
+    h_all = equivariant_layers_apply(
+        params['layers'],
+        ae=ae, r_ae=r_ae,
+        ee=ee, r_ee=r_ee,
+        spins=spins, charges=charges,
+    )
+
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_ORBITAL:
+      raise ValueError(
+          "make_orbitals_with_zero_projection_pooled only supports PRE_DETERMINANT."
+      )
+
+    # split by spin channels (active only)
+    h_by_spin = jnp.split(h_all, network_blocks.array_partitions(nspins), axis=0)
+    h_by_spin = [h for h, spin in zip(h_by_spin, nspins) if spin > 0]
+    active_spin_channels = [spin for spin in nspins if spin > 0]
+    active_spin_partitions = network_blocks.array_partitions(active_spin_channels)
+
+    # orbital linear heads (unchanged)
+    orbitals = [
+        network_blocks.linear_layer(h, **p)
+        for h, p in zip(h_by_spin, params['orbital'])
+    ]
+    if options.complex_output:
+      orbitals = [orb[..., ::2] + 1.0j * orb[..., 1::2] for orb in orbitals]
+
+    # apply envelope with zeros from pooled projection
+    if options.envelope.apply_type == envelopes.EnvelopeType.PRE_DETERMINANT:
+      ae_channels = jnp.split(ae, active_spin_partitions, axis=0)
+      r_ae_channels = jnp.split(r_ae, active_spin_partitions, axis=0)
+      r_ee_channels = jnp.split(r_ee, active_spin_partitions, axis=0)
+
+      N_holo_local = N_holo
+
+      for i in range(len(active_spin_channels)):
+        env_i = params['envelope'][i]
+        zeros_template = env_i['zeros_holo_unconstrained']
+        rows, nenv_orb = zeros_template.shape
+        assert rows == 2 * N_holo_local
+
+        # --- POOLING HERE ---
+        h_spin = h_by_spin[i]                 # (n_spin_elec, dims_orbital_in)
+        h_pool = jnp.mean(h_spin, axis=0, keepdims=True)  # (1, dims_orbital_in)
+        # alternatives:
+        # h_pool = jnp.sum(h_spin, axis=0, keepdims=True)
+        # h_pool = jnp.max(h_spin, axis=0, keepdims=True)
+
+        zero_flat = network_blocks.linear_layer(h_pool, **params['zero_head'][i])
+        zero_flat = zero_flat[0]  # (2*N_holo_local*nenv_orb,)
+
+        zeros_orbital = zero_flat.reshape(nenv_orb, N_holo_local, 2)
+        zh = jnp.transpose(zeros_orbital, (1, 2, 0))          # (N_holo, 2, nenv_orb)
+        zeros_h_weight = zh.reshape(2 * N_holo_local, nenv_orb)
+
+        env_kwargs = dict(env_i)
+        env_kwargs['zeros_holo_unconstrained'] = zeros_h_weight.astype(jnp.float32)
+
+        env_factor = options.envelope.apply(
+            ae=ae_channels[i],
+            r_ae=r_ae_channels[i],
+            r_ee=r_ee_channels[i],
+            **env_kwargs,
+        )
+
+        orbitals[i] = orbitals[i] * env_factor
+
+    # reshape into matrices (unchanged)
+    shapes = [
+        (spin, -1, sum(nspins) if options.full_det else spin)
+        for spin in active_spin_channels
+    ]
+    orbitals = [jnp.reshape(orb, shape) for orb, shape in zip(orbitals, shapes)]
+    orbitals = [jnp.transpose(orb, (1, 0, 2)) for orb in orbitals]
+    if options.full_det:
+      orbitals = [jnp.concatenate(orbitals, axis=1)]
+
+    # Jastrow (unchanged)
+    if jastrow_apply is not None:
+      jastrow_val = jnp.exp(
+          jastrow_apply(r_ee, params['jastrow'], nspins) / sum(nspins)
+      )
+      orbitals = [orb * jastrow_val for orb in orbitals]
+
+    return orbitals
+
+  return init, apply
   
 def make_orbitals_bosons_sum(
     nspins: Tuple[int, int],
